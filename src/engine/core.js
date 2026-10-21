@@ -2,7 +2,6 @@
 //  Operator precedence for expression parsing
 // ─────────────────────────────────────────────────────────────
 
-const OPERATOR_PRECEDENCE = { '+': 1, '-': 1, '*': 2, '/': 2 }
 const MAX_UNDO_HISTORY = 100
 
 // ─────────────────────────────────────────────────────────────
@@ -17,21 +16,31 @@ function columnLetterToIndex(columnLetter) {
     return index - 1
 }
 
-function indexToCellKey(row, col) {
-    let columnLabel = ''
-    let colNumber = col + 1
-    while (colNumber > 0) {
-        colNumber--
-        columnLabel = String.fromCharCode(65 + (colNumber % 26)) + columnLabel
-        colNumber = Math.floor(colNumber / 26)
+function indexToColumnLetter(col) {
+    let label = ''
+    let n = col + 1
+    while (n > 0) {
+        n--
+        label = String.fromCharCode(65 + (n % 26)) + label
+        n = Math.floor(n / 26)
     }
-    return columnLabel + (row + 1)
+    return label
 }
 
-function parseCellKey(cellKey) {
-    const match = cellKey.match(/^([A-Z]+)(\d+)$/)
+function indexToCellKey(row, col) {
+    return indexToColumnLetter(col) + (row + 1)
+}
+
+// Accepts A1, $A$1, $A1, A$1. Returns 0-based row/col plus absolute flags.
+export function parseCellKey(cellKey) {
+    const match = cellKey.match(/^(\$?)([A-Za-z]+)(\$?)(\d+)$/)
     if (!match) return null
-    return { row: parseInt(match[2]) - 1, col: columnLetterToIndex(match[1]) }
+    return {
+        row: parseInt(match[4], 10) - 1,
+        col: columnLetterToIndex(match[2].toUpperCase()),
+        colAbs: match[1] === '$',
+        rowAbs: match[3] === '$',
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -157,216 +166,124 @@ function createDependencyGraph() {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Tokenizer — converts formula string into tokens
+//  Tokenizer + recursive-descent parser
+//  Grammar:  expr   = term (('+'|'-') term)*
+//            term   = unary (('*'|'/') unary)*
+//            unary  = ('-'|'+') unary | primary
+//            primary= number | cell [':' cell] | FUNC '(' range ')' | '(' expr ')'
+//  Cell tokens are normalised: "$g$2" -> "G2" (the $ only matters for shifting).
 // ─────────────────────────────────────────────────────────────
+
+const CELL_TOKEN_RE = /\$?[A-Za-z]{1,3}\$?\d+(?![A-Za-z0-9_(])/y
+const IDENT_RE = /[A-Za-z_][A-Za-z0-9_]*/y
 
 function tokenize(expression) {
     const tokens = []
-    let position = 0
-
-    while (position < expression.length) {
-        const char = expression[position]
-
-        if (char === ' ') {
-            position++
+    let pos = 0
+    while (pos < expression.length) {
+        const ch = expression[pos]
+        if (ch === ' ') { pos++; continue }
+        if ('()+-*/,:'.includes(ch)) {
+            tokens.push({ type: 'punct', value: ch })
+            pos++
             continue
         }
-
-        if (char === '(' || char === ')') {
-            tokens.push({ type: 'paren', value: char })
-            position++
-            continue
-        }
-
-        if ('+-*/,'.includes(char)) {
-            tokens.push({ type: 'operator', value: char })
-            position++
-            continue
-        }
-
-        if (char === ':') {
-            tokens.push({ type: 'range', value: ':' })
-            position++
-            continue
-        }
-
-        if ((char >= '0' && char <= '9') || char === '.') {
-            let numberStr = ''
-            while (position < expression.length && ((expression[position] >= '0' && expression[position] <= '9') || expression[position] === '.')) {
-                numberStr += expression[position]
-                position++
+        if ((ch >= '0' && ch <= '9') || ch === '.') {
+            let s = ''
+            while (pos < expression.length && ((expression[pos] >= '0' && expression[pos] <= '9') || expression[pos] === '.')) {
+                s += expression[pos++]
             }
-            tokens.push({ type: 'number', value: parseFloat(numberStr) })
+            const n = parseFloat(s)
+            if (isNaN(n)) throw new Error('Bad number')
+            tokens.push({ type: 'number', value: n })
             continue
         }
-
-        if ((char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z')) {
-            let identifier = ''
-            while (position < expression.length && ((expression[position] >= 'A' && expression[position] <= 'Z') || (expression[position] >= 'a' && expression[position] <= 'z') || (expression[position] >= '0' && expression[position] <= '9'))) {
-                identifier += expression[position].toUpperCase()
-                position++
-            }
-            if (position < expression.length && expression[position] === ':') {
-                tokens.push({ type: 'cell', value: identifier })
-            } else {
-                const cellMatch = identifier.match(/^([A-Z]+)(\d+)$/)
-                if (cellMatch) {
-                    tokens.push({ type: 'cell', value: identifier })
-                } else {
-                    tokens.push({ type: 'function', value: identifier })
-                }
-            }
+        CELL_TOKEN_RE.lastIndex = pos
+        const cm = CELL_TOKEN_RE.exec(expression)
+        if (cm) {
+            tokens.push({ type: 'cell', value: cm[0].replace(/\$/g, '').toUpperCase() })
+            pos += cm[0].length
             continue
         }
-
-        throw new Error(`Unexpected character: ${char}`)
+        IDENT_RE.lastIndex = pos
+        const im = IDENT_RE.exec(expression)
+        if (im && expression[pos + im[0].length] === '(') {
+            tokens.push({ type: 'function', value: im[0].toUpperCase() })
+            pos += im[0].length
+            continue
+        }
+        throw new Error(`Unexpected character: ${ch}`)
     }
-
     return tokens
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Parser — converts tokens into an AST using shunting-yard
-// ─────────────────────────────────────────────────────────────
-
 function parseTokensToAST(tokens) {
-    const outputQueue = []
-    const operatorStack = []
-    let position = 0
+    let pos = 0
+    const peek = () => tokens[pos]
+    const next = () => tokens[pos++]
+    const isPunct = (t, v) => t && t.type === 'punct' && t.value === v
 
-    while (position < tokens.length) {
-        const token = tokens[position]
-
-        if (token.type === 'number' || token.type === 'cell') {
-            outputQueue.push(token)
-            position++
-        } else if (token.type === 'function') {
-            operatorStack.push(token)
-            position++
-        } else if (token.type === 'operator') {
-            while (
-                operatorStack.length > 0 &&
-                operatorStack[operatorStack.length - 1].type === 'operator' &&
-                OPERATOR_PRECEDENCE[operatorStack[operatorStack.length - 1].value] >= OPERATOR_PRECEDENCE[token.value]
-            ) {
-                outputQueue.push(operatorStack.pop())
-            }
-            operatorStack.push(token)
-            position++
-        } else if (token.type === 'paren' && token.value === '(') {
-            operatorStack.push(token)
-            position++
-        } else if (token.type === 'paren' && token.value === ')') {
-            // Before popping operators, check if we need to combine a range marker
-            if (outputQueue.length >= 3 && outputQueue[outputQueue.length - 2].type === 'range' && outputQueue[outputQueue.length - 2].value === ':') {
-                // Pattern: cell, :, cell on top of stack
-                const endCell = outputQueue.pop()
-                const marker = outputQueue.pop()
-                const startCell = outputQueue.pop()
-                if (startCell.type === 'cell' && endCell.type === 'cell') {
-                    outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
-                } else {
-                    // Put them back if not valid
-                    outputQueue.push(startCell)
-                    outputQueue.push(marker)
-                    outputQueue.push(endCell)
-                }
-            }
-            
-            while (operatorStack.length > 0 && operatorStack[operatorStack.length - 1].value !== '(') {
-                outputQueue.push(operatorStack.pop())
-            }
-            if (operatorStack.length > 0 && operatorStack[operatorStack.length - 1].value === '(') {
-                operatorStack.pop()
-            }
-            if (operatorStack.length > 0 && operatorStack[operatorStack.length - 1].type === 'function') {
-                const funcToken = operatorStack.pop()
-                if (outputQueue.length > 0 && outputQueue[outputQueue.length - 1].type === 'range') {
-                    const rangeToken = outputQueue.pop()
-                    outputQueue.push({ type: 'function', name: funcToken.value, range: rangeToken })
-                } else {
-                    outputQueue.push(funcToken)
-                }
-            }
-            position++
-        } else if (token.type === 'range') {
-            // Range handler: check if we have enough cells on output queue
-            // If not (e.g., in SUM(A1:A2) where A2 comes after :), push : as a marker
-            // and combine during RPN building
-            if (outputQueue.length >= 2) {
-                const endCell = outputQueue.pop()
-                const startCell = outputQueue.pop()
-                if (startCell.type !== 'cell' || endCell.type !== 'cell') {
-                    throw new Error('Range must be between two cell references')
-                }
-                outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
-            } else {
-                // Not enough cells yet, push range marker to be processed later
-                outputQueue.push({ type: 'range', value: ':' })
-            }
-            position++
-        } else {
-            position++
+    function expr() {
+        let left = term()
+        while (isPunct(peek(), '+') || isPunct(peek(), '-')) {
+            const operator = next().value
+            left = { type: 'binary', operator, left, right: term() }
         }
+        return left
     }
 
-    while (operatorStack.length > 0) {
-        if (operatorStack[operatorStack.length - 1].value === '(') {
-            throw new Error('Mismatched parentheses')
+    function term() {
+        let left = unary()
+        while (isPunct(peek(), '*') || isPunct(peek(), '/')) {
+            const operator = next().value
+            left = { type: 'binary', operator, left, right: unary() }
         }
-        outputQueue.push(operatorStack.pop())
+        return left
     }
 
-    return buildASTFromRPN(outputQueue)
-}
-
-function buildASTFromRPN(rpnTokens) {
-    const stack = []
-
-    for (const token of rpnTokens) {
-        if (token.type === 'number') {
-            stack.push(token)
-        } else if (token.type === 'cell') {
-            // Check if there's a range marker on top of stack
-            if (stack.length > 0 && stack[stack.length - 1].type === 'range' && stack[stack.length - 1].value === ':') {
-                // Pop the marker and combine with this cell as end, need start cell before marker
-                const marker = stack.pop()
-                if (stack.length === 0 || stack[stack.length - 1].type !== 'cell') {
-                    throw new Error('Invalid range syntax')
-                }
-                const startCell = stack.pop()
-                stack.push({ type: 'range', start: startCell.value, end: token.value })
-            } else {
-                stack.push(token)
-            }
-        } else if (token.type === 'range' && token.value === ':') {
-            // Range marker: push to stack, will combine with next cell
-            stack.push(token)
-        } else if (token.type === 'range' && token.start) {
-            // Fully formed range (from earlier combination)
-            stack.push(token)
-        } else if (token.type === 'operator') {
-            if (stack.length < 2) throw new Error('Invalid expression')
-            const right = stack.pop()
-            const left = stack.pop()
-            stack.push({ type: 'binary', operator: token.value, left, right })
-        } else if (token.type === 'function') {
-            if (token.range) {
-                stack.push(token)
-            } else {
-                if (stack.length === 0) throw new Error(`Function ${token.value} requires arguments`)
-                const argument = stack.pop()
-                if (argument.type === 'range') {
-                    stack.push({ type: 'function', name: token.value, range: argument })
-                } else {
-                    throw new Error(`Function ${token.value} requires a range`)
-                }
-            }
+    function unary() {
+        if (isPunct(peek(), '-')) {
+            next()
+            return { type: 'binary', operator: '-', left: { type: 'number', value: 0 }, right: unary() }
         }
+        if (isPunct(peek(), '+')) {
+            next()
+            return unary()
+        }
+        return primary()
     }
 
-    if (stack.length !== 1) throw new Error('Invalid expression')
-    return stack[0]
+    function primary() {
+        const t = next()
+        if (!t) throw new Error('Unexpected end of formula')
+        if (t.type === 'number') return { type: 'number', value: t.value }
+        if (t.type === 'cell') {
+            if (isPunct(peek(), ':')) {
+                next()
+                const end = next()
+                if (!end || end.type !== 'cell') throw new Error('Invalid range')
+                return { type: 'range', start: t.value, end: end.value }
+            }
+            return { type: 'cell', value: t.value }
+        }
+        if (t.type === 'function') {
+            if (!isPunct(next(), '(')) throw new Error('Expected (')
+            const arg = expr()
+            if (arg.type !== 'range') throw new Error(`Function ${t.value} requires a range`)
+            if (!isPunct(next(), ')')) throw new Error('Mismatched parentheses')
+            return { type: 'function', name: t.value, range: arg }
+        }
+        if (isPunct(t, '(')) {
+            const inner = expr()
+            if (!isPunct(next(), ')')) throw new Error('Mismatched parentheses')
+            return inner
+        }
+        throw new Error('Unexpected token')
+    }
+
+    const ast = expr()
+    if (pos < tokens.length) throw new Error('Unexpected token')
+    return ast
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -408,11 +325,12 @@ function evaluateAST(ast, getCellValue, visited = new Set()) {
 
     if (ast.type === 'range') throw new Error('VALUE')
 
-    if (ast.type === 'binary') {
-        const leftVal = evaluateAST(ast.left, getCellValue, visited)
-        const rightVal = evaluateAST(ast.right, getCellValue, visited)
-        if (typeof leftVal !== 'number' || typeof rightVal !== 'number') throw new Error('VALUE')
-        switch (ast.operator) {
+        if (ast.type === 'binary') {
+            const toNum = (v) => (v === '' ? 0 : v)
+            const leftVal = toNum(evaluateAST(ast.left, getCellValue, visited))
+            const rightVal = toNum(evaluateAST(ast.right, getCellValue, visited))
+            if (typeof leftVal !== 'number' || typeof rightVal !== 'number') throw new Error('VALUE')
+            switch (ast.operator) {
             case '+': return leftVal + rightVal
             case '-': return leftVal - rightVal
             case '*': return leftVal * rightVal
@@ -451,6 +369,7 @@ function evaluateFormula(expression, getCellValue) {
         if (!expression || expression.trim() === '') return { value: '', error: null }
         if (!expression.startsWith('=')) return { value: expression, error: null }
 
+        if (expression.includes('#REF!')) return { value: null, error: '#REF!' }
         const formulaBody = expression.slice(1).trim()
         if (formulaBody === '') return { value: '', error: null }
 
@@ -467,45 +386,72 @@ function evaluateFormula(expression, getCellValue) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Reference shifting (for insert/delete row/col)
+//  Reference rewriting
 // ─────────────────────────────────────────────────────────────
 
-function shiftCellReferences(formula, rowShift, colShift, atIndex, isColumnOperation = false) {
+// Matches A1, $A$1, $A1, A$1 but not function names like SUM( or LOG10(
+const REF_RE = /(?<![A-Za-z0-9_$])(\$?)([A-Za-z]{1,3})(\$?)(\d+)(?![A-Za-z0-9_(])/g
+
+function mapReferences(formula, fn) {
     if (!formula || !formula.startsWith('=')) return formula
-
-    // Shift cell references in formulas when rows/columns are inserted or deleted
-    // Note: This function modifies ALL cell references in the formula, including those
-    // in ranges. The logic ensures references shift correctly based on the operation type.
-    return formula.replace(/([A-Z]+)(\d+)/g, (match, colLetter, rowStr) => {
-        const colIdx = columnLetterToIndex(colLetter)
-        const rowIdx = parseInt(rowStr) - 1
-        let newRow = rowIdx
-        let newCol = colIdx
-
-        if (isColumnOperation) {
-            // For column operations, only shift columns at or after the insertion/deletion point
-            if (colIdx >= atIndex) newCol = colIdx + colShift
-        } else {
-            // For row operations, only shift rows at or after the insertion/deletion point
-            if (rowIdx >= atIndex) newRow = rowIdx + rowShift
+    return formula.replace(REF_RE, (match, colDollar, colLetters, rowDollar, rowDigits) => {
+        const ref = {
+            col: columnLetterToIndex(colLetters.toUpperCase()),
+            row: parseInt(rowDigits, 10) - 1,
+            colAbs: colDollar === '$',
+            rowAbs: rowDollar === '$',
         }
-
-        // Preserve original reference if shifting would result in invalid coordinates
-        // This prevents formulas from breaking when rows/cols are deleted at boundaries
-        if (newRow < 0 || newCol < 0) return match
-        return indexToCellKey(newRow, newCol)
+        const out = fn(ref)
+        if (out === null) return match
+        if (out === '#REF!') return '#REF!'
+        return (ref.colAbs ? '$' : '') + indexToColumnLetter(out.col) + (ref.rowAbs ? '$' : '') + (out.row + 1)
     })
 }
 
+// Structural edits (insert/delete row/col): EVERY reference moves, $ or not,
+// because the cell it points to physically moved.
+export function shiftCellReferences(formula, rowShift, colShift, atIndex, isColumnOperation = false) {
+    return mapReferences(formula, ({ row, col }) => {
+        let newRow = row
+        let newCol = col
+        if (isColumnOperation) {
+            if (col >= atIndex) newCol = col + colShift
+        } else if (row >= atIndex) {
+            newRow = row + rowShift
+        }
+        if (newRow < 0 || newCol < 0) return null
+        return { row: newRow, col: newCol }
+    })
+}
+
+// Fill / copy: only RELATIVE parts move; $ parts stay pinned.
+export function shiftFormulaForFill(formula, deltaRow, deltaCol) {
+    return mapReferences(formula, ({ row, col, rowAbs, colAbs }) => {
+        const newRow = rowAbs ? row : row + deltaRow
+        const newCol = colAbs ? col : col + deltaCol
+        if (newRow < 0 || newCol < 0) return '#REF!'
+        return { row: newRow, col: newCol }
+    })
+}
+
+// Every cell a formula reads, ranges expanded, $ stripped.
 function extractCellReferences(formula) {
     const references = new Set()
-    // Extract cell references using regex
-    // Note: This regex matches cell references like A1, B2, AA10, etc.
-    // It does NOT extract individual cells from ranges (e.g., A1:A5 only extracts A1 and A5)
-    const regex = /([A-Z]+\d+)/g
-    let match
-    while ((match = regex.exec(formula)) !== null) {
-        references.add(match[1])
+    const collect = (node) => {
+        if (!node) return
+        if (node.type === 'cell') references.add(node.value)
+        else if (node.type === 'range') {
+            for (const key of expandCellRange(node.start, node.end)) references.add(key)
+        } else if (node.type === 'binary') {
+            collect(node.left)
+            collect(node.right)
+        } else if (node.type === 'function') collect(node.range)
+    }
+    try {
+        collect(parseTokensToAST(tokenize(formula.slice(1))))
+    } catch {
+        // Unparseable formula: fall back to single refs so a later fix still tracks them
+        for (const m of formula.matchAll(REF_RE)) references.add((m[2] + m[4]).toUpperCase())
     }
     return references
 }
