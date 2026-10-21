@@ -257,6 +257,22 @@ function parseTokensToAST(tokens) {
             operatorStack.push(token)
             position++
         } else if (token.type === 'paren' && token.value === ')') {
+            // Before popping operators, check if we need to combine a range marker
+            if (outputQueue.length >= 3 && outputQueue[outputQueue.length - 2].type === 'range' && outputQueue[outputQueue.length - 2].value === ':') {
+                // Pattern: cell, :, cell on top of stack
+                const endCell = outputQueue.pop()
+                const marker = outputQueue.pop()
+                const startCell = outputQueue.pop()
+                if (startCell.type === 'cell' && endCell.type === 'cell') {
+                    outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
+                } else {
+                    // Put them back if not valid
+                    outputQueue.push(startCell)
+                    outputQueue.push(marker)
+                    outputQueue.push(endCell)
+                }
+            }
+            
             while (operatorStack.length > 0 && operatorStack[operatorStack.length - 1].value !== '(') {
                 outputQueue.push(operatorStack.pop())
             }
@@ -274,13 +290,20 @@ function parseTokensToAST(tokens) {
             }
             position++
         } else if (token.type === 'range') {
-            if (outputQueue.length < 2) throw new Error('Invalid range syntax')
-            const endCell = outputQueue.pop()
-            const startCell = outputQueue.pop()
-            if (startCell.type !== 'cell' || endCell.type !== 'cell') {
-                throw new Error('Range must be between two cell references')
+            // Range handler: check if we have enough cells on output queue
+            // If not (e.g., in SUM(A1:A2) where A2 comes after :), push : as a marker
+            // and combine during RPN building
+            if (outputQueue.length >= 2) {
+                const endCell = outputQueue.pop()
+                const startCell = outputQueue.pop()
+                if (startCell.type !== 'cell' || endCell.type !== 'cell') {
+                    throw new Error('Range must be between two cell references')
+                }
+                outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
+            } else {
+                // Not enough cells yet, push range marker to be processed later
+                outputQueue.push({ type: 'range', value: ':' })
             }
-            outputQueue.push({ type: 'range', start: startCell.value, end: endCell.value })
             position++
         } else {
             position++
@@ -301,7 +324,26 @@ function buildASTFromRPN(rpnTokens) {
     const stack = []
 
     for (const token of rpnTokens) {
-        if (token.type === 'number' || token.type === 'cell' || token.type === 'range') {
+        if (token.type === 'number') {
+            stack.push(token)
+        } else if (token.type === 'cell') {
+            // Check if there's a range marker on top of stack
+            if (stack.length > 0 && stack[stack.length - 1].type === 'range' && stack[stack.length - 1].value === ':') {
+                // Pop the marker and combine with this cell as end, need start cell before marker
+                const marker = stack.pop()
+                if (stack.length === 0 || stack[stack.length - 1].type !== 'cell') {
+                    throw new Error('Invalid range syntax')
+                }
+                const startCell = stack.pop()
+                stack.push({ type: 'range', start: startCell.value, end: token.value })
+            } else {
+                stack.push(token)
+            }
+        } else if (token.type === 'range' && token.value === ':') {
+            // Range marker: push to stack, will combine with next cell
+            stack.push(token)
+        } else if (token.type === 'range' && token.start) {
+            // Fully formed range (from earlier combination)
             stack.push(token)
         } else if (token.type === 'operator') {
             if (stack.length < 2) throw new Error('Invalid expression')

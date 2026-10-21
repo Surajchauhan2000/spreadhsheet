@@ -40,3 +40,29 @@ describe('engine basics', () => {
         expect(engine.getCell(5, 0).computed).toBe(6)
     })
 })
+
+describe('range parsing bug fix', () => {
+    it('evaluates SUM(A1:A2) inside function call', () => {
+        const engine = createEngine(10, 10)
+        engine.setCell(0, 0, '10')
+        engine.setCell(1, 0, '20')
+        engine.setCell(2, 0, '=SUM(A1:A2)')
+        expect(engine.getCell(2, 0).computed).toBe(30)
+    })
+
+    it('evaluates SUM(A1:A2)*2', () => {
+        const engine = createEngine(10, 10)
+        engine.setCell(0, 0, '10')
+        engine.setCell(1, 0, '20')
+        engine.setCell(2, 0, '=SUM(A1:A2)*2')
+        expect(engine.getCell(2, 0).computed).toBe(60)
+    })
+
+    it('evaluates SUM(A1:A2)+1', () => {
+        const engine = createEngine(10, 10)
+        engine.setCell(0, 0, '10')
+        engine.setCell(1, 0, '20')
+        engine.setCell(2, 0, '=SUM(A1:A2)+1')
+        expect(engine.getCell(2, 0).computed).toBe(31)
+    })
+})
