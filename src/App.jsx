@@ -2,12 +2,13 @@ import { useState, useRef, useEffect } from 'react'
 import './App.css'
 import { createEngine } from './engine/core.js'
 import { fillRange } from './engine/fillRange.js'
-import { normRange, inRange, sameRect, rangeLabel, columnLabel, fillTargetFor, pickSortRange } from './engine/selection.js'
+import { normRange, sameRect, rangeLabel, columnLabel, fillTargetFor, pickSortRange, parseRef } from './engine/selection.js'
+import VirtualGrid from './VirtualGrid.jsx'
 import { loadSampleSmall, loadSampleLarge } from './fixtures/loadSample.js'
 import FilterMenu from './engine/FilterMenu.jsx'
 
-const TOTAL_ROWS = 50
-const TOTAL_COLS = 50
+const TOTAL_ROWS = 100000
+const TOTAL_COLS = 200
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const single = (r, c) => ({ anchor: { r, c }, focus: { r, c } })
@@ -18,10 +19,6 @@ function timed(fn) {
   return { result, ms: performance.now() - t0 }
 }
 
-function formatComputed(v) {
-  if (typeof v === 'number') return String(Math.round(v * 1e10) / 1e10)
-  return v == null ? '' : String(v)
-}
 
 export default function App() {
   const [engine] = useState(() => createEngine(TOTAL_ROWS, TOTAL_COLS))
@@ -37,6 +34,9 @@ export default function App() {
   const gridRef = useRef(null)
   const dragRef = useRef(null)
   const skipBlurRef = useRef(false)
+  const apiRef = useRef(null)                      // VirtualGrid's scrollToCell / pageRows
+  const [freeze, setFreeze] = useState({ rows: 0, cols: 0 })
+  const [nameEdit, setNameEdit] = useState(null)   // text typed in the name box (null = show selection label)
 
   const rerender = () => setVersion((v) => v + 1)
   const range = normRange(sel)
@@ -116,9 +116,28 @@ export default function App() {
     const rr = clamp(r, 0, engine.rows - 1)
     const cc = clamp(c, 0, engine.cols - 1)
     setSel((s) => (extend ? { anchor: s.anchor, focus: { r: rr, c: cc } } : single(rr, cc)))
-    gridRef.current
-      ?.querySelector(`td[data-kind="cell"][data-r="${rr}"][data-c="${cc}"]`)
-      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    apiRef.current?.scrollToCell(rr, cc)
+  }
+
+  const jumpTo = (text) => {
+    const rg = parseRef(text)
+    if (!rg) { setStatus(`"${text}" is not a cell or range`); return }
+    if (rg.r2 >= engine.rows || rg.c2 >= engine.cols) { setStatus(`${text} is outside the grid`); return }
+    setSel({ anchor: { r: rg.r1, c: rg.c1 }, focus: { r: rg.r2, c: rg.c2 } })
+    apiRef.current?.scrollToCell(rg.r1, rg.c1)
+    gridRef.current?.focus({ preventScroll: true })
+  }
+
+  const handleNameKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const text = e.currentTarget.value
+      setNameEdit(null)
+      jumpTo(text)
+    } else if (e.key === 'Escape') {
+      setNameEdit(null)
+      gridRef.current?.focus({ preventScroll: true })
+    }
   }
 
   const handleCellInputKeyDown = (e) => {
@@ -161,6 +180,33 @@ export default function App() {
       if (used) setSel({ anchor: { r: used.r1, c: used.c1 }, focus: { r: used.r2, c: used.c2 } })
       return
     }
+    if (mod && e.key.toLowerCase() === 'd') {
+      e.preventDefault()
+      const { ms } = timed(() => fillRange(engine, { ...range, r2: range.r1 }, range)) // ONE undo step
+      rerender()
+      setStatus(`Filled ${range.r2 - range.r1 + 1} rows in ${ms.toFixed(0)} ms`)
+      return
+    }
+    if (mod && e.key === 'Home') { e.preventDefault(); return moveTo(0, 0, e.shiftKey) }
+    if (mod && e.key === 'End') {
+      e.preventDefault()
+      const used = engine.getUsedRange()
+      if (used) moveTo(used.r2, used.c2, e.shiftKey)
+      return
+    }
+
+  if (mod && e.key.startsWith('Arrow')) {
+    e.preventDefault()
+    const used = engine.getUsedRange()
+    const f = e.shiftKey ? sel.focus : sel.anchor
+    const lastR = used ? used.r2 : engine.rows - 1
+    const lastC = used ? used.c2 : engine.cols - 1
+    if (e.key === 'ArrowDown') return moveTo(lastR, f.c, e.shiftKey)
+    if (e.key === 'ArrowUp') return moveTo(0, f.c, e.shiftKey)
+    if (e.key === 'ArrowRight') return moveTo(f.r, lastC, e.shiftKey)
+    return moveTo(f.r, 0, e.shiftKey)
+  }
+
     if (mod) return // Ctrl+Z / Ctrl+Y are handled globally
 
     const from = e.shiftKey ? sel.focus : sel.anchor
@@ -170,6 +216,9 @@ export default function App() {
     }
 
     switch (e.key) {
+      case 'PageDown': return step(apiRef.current?.pageRows() ?? 20, 0)
+      case 'PageUp': return step(-(apiRef.current?.pageRows() ?? 20), 0)
+      case 'Home': e.preventDefault(); return moveTo(from.r, 0, e.shiftKey)
       case 'ArrowDown': return step(1, 0)
       case 'ArrowUp': return step(-1, 0)
       case 'ArrowLeft': return step(0, -1)
@@ -286,11 +335,14 @@ export default function App() {
   }
 
   const clearAllCells = () => {
-    const changes = []
-    for (let r = 0; r < engine.rows; r++) {
-      for (let c = 0; c < engine.cols; c++) changes.push({ row: r, col: c, raw: '', style: null })
+    const used = engine.getUsedRange()
+    if (used) {
+      const changes = []
+      for (let r = used.r1; r <= used.r2; r++) {
+        for (let c = used.c1; c <= used.c2; c++) changes.push({ row: r, col: c, raw: '', style: null })
+      }
+      engine.applyChanges(changes)
     }
-    engine.applyChanges(changes)
     setSel(single(0, 0))
     setEditing(null)
     rerender()
@@ -301,6 +353,7 @@ export default function App() {
     rerender()
     setSel(single(0, 0))
     setEditing(null)
+    apiRef.current?.scrollToCell(0, 0)
   }
 
   const shiftSel = (dr, dc) =>
@@ -426,13 +479,26 @@ const doSort = (col) => {
           </div>
 
           <div className="toolbar-group">
+            <button className={`toolbar-btn ${freeze.rows ? 'active' : ''}`} onClick={() => setFreeze((f) => ({ ...f, rows: f.rows ? 0 : 1 }))} title="Freeze row 1">❄ Row 1</button>
+            <button className={`toolbar-btn ${freeze.cols ? 'active' : ''}`} onClick={() => setFreeze((f) => ({ ...f, cols: f.cols ? 0 : 1 }))} title="Freeze column A">❄ Col A</button>
+          </div>
+
+          <div className="toolbar-group">
             <button className="toolbar-btn" onClick={() => loadSample(loadSampleSmall)} title="Load fixtures/sales.tsv (33 rows) at A1">⬇ Sample 33</button>
             <button className="toolbar-btn" onClick={() => loadSample(loadSampleLarge)} title="Load fixtures/sales-large.tsv (~3,000 rows) at A1">⬇ Sample 3k</button>
           </div>
         </div>
 
         <div className="formula-bar">
-          <span className="formula-bar-label">{rangeLabel(range)}</span>
+          <input
+            className="formula-bar-label name-box"
+            value={nameEdit ?? rangeLabel(range)}
+            onChange={(e) => setNameEdit(e.target.value)}
+            onFocus={(e) => e.target.select()}
+            onKeyDown={handleNameKeyDown}
+            onBlur={() => setNameEdit(null)}
+            title="Name box: type A1 or A1:B9 and press Enter"
+          />
           <input
             className="formula-bar-input"
             value={formulaBarValue}
@@ -447,119 +513,31 @@ const doSort = (col) => {
           />
         </div>
 
-        <div className="grid-scroll" ref={gridRef} tabIndex={0} onKeyDown={handleGridKeyDown}>
-          <table
-            className="grid-table"
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onDoubleClick={handleDoubleClick}
-          >
-            <thead>
-              <tr>
-                <th className="col-header-blank" data-kind="all"></th>
-                {Array.from({ length: engine.cols }, (_, c) => (
-                  <th
-                    key={c}
-                    data-kind="col"
-                    data-c={c}
-                    className={`col-header ${c >= range.c1 && c <= range.c2 ? 'hdr-sel' : ''}`}
-                  >
-                    <span className="hdr-label">{columnLabel(c)}</span>
-                    <button className={`hdr-btn ${curSort?.col === c ? 'on' : ''}`} data-kind="sort" title="Sort: ascending, descending, original" onClick={() => doSort(c)}>
-                      {curSort?.col === c ? (curSort.dir === 'asc' ? '▲' : '▼') : '⇅'}
-                    </button>
-                    <button className={`hdr-btn ${engine.getFilter(c) ? 'on' : ''}`} data-kind="filter" title="Filter" onClick={(e) => openFilter(e, c)}>▾</button>
-
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {Array.from({ length: engine.rows }, (_, r) => (
-               <tr key={r} style={engine.isRowHidden(r) ? { display: 'none' } : undefined}>
-                  <td
-                    data-kind="row"
-                    data-r={r}
-                    className={`row-header ${r >= range.r1 && r <= range.r2 ? 'hdr-sel' : ''}`}
-                  >
-                    {r + 1}
-                  </td>
-                  {Array.from({ length: engine.cols }, (_, c) => {
-                    const cellData = engine.getCell(r, c)
-                    const style = cellData.style || {}
-                    const display = cellData.error
-                      ? cellData.error
-                      : cellData.raw.startsWith('=') ? formatComputed(cellData.computed) : cellData.raw
-
-                    let cls = 'cell'
-                    if (inRange(range, r, c)) {
-                      cls += ' in-sel'
-                      if (r === range.r1) cls += ' sel-t'
-                      if (r === range.r2) cls += ' sel-b'
-                      if (c === range.c1) cls += ' sel-l'
-                      if (c === range.c2) cls += ' sel-r'
-                    }
-                    if (r === active.r && c === active.c) cls += ' active'
-                    if (fillTarget && inRange(fillTarget, r, c)) {
-                      cls += ' fp'
-                      if (r === fillTarget.r1) cls += ' fp-t'
-                      if (r === fillTarget.r2) cls += ' fp-b'
-                      if (c === fillTarget.c1) cls += ' fp-l'
-                      if (c === fillTarget.c2) cls += ' fp-r'
-                    }
-
-                    const isCellEditor = editing && editing.source === 'cell' && editing.r === r && editing.c === c
-                    const isBarEditing = editing && editing.source === 'bar' && editing.r === r && editing.c === c
-                    const textStyle = {
-                      fontWeight: style.bold ? 'bold' : 'normal',
-                      fontStyle: style.italic ? 'italic' : 'normal',
-                      textDecoration: style.underline ? 'underline' : 'none',
-                      color: cellData.error ? '#d93025' : (style.color || '#202124'),
-                      fontSize: (style.fontSize || 13) + 'px',
-                    }
-
-                    return (
-                      <td
-                        key={c}
-                        data-kind="cell"
-                        data-r={r}
-                        data-c={c}
-                        className={cls}
-                        style={{ background: style.bg || 'white' }}
-                      >
-                        {isCellEditor ? (
-                          <input
-                            autoFocus
-                            className="cell-input"
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onFocus={(e) => e.target.setSelectionRange(e.target.value.length, e.target.value.length)}
-                            onBlur={() => {
-                              if (skipBlurRef.current) { skipBlurRef.current = false; return }
-                              commitEdit()
-                            }}
-                            onKeyDown={handleCellInputKeyDown}
-                            style={{ ...textStyle, textAlign: style.align || 'left', background: style.bg || 'white' }}
-                          />
-                        ) : (
-                          <div
-                            className={`cell-display align-${style.align || 'left'} ${cellData.error ? 'error' : ''}`}
-                            style={textStyle}
-                          >
-                            {isBarEditing ? editValue : display}
-                          </div>
-                        )}
-                        {!editing && r === range.r2 && c === range.c2 && (
-                          <div className="fill-handle" data-kind="handle" title="Drag to fill"></div>
-                        )}
-                      </td>
-                    )
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <VirtualGrid
+          engine={engine}
+          gridRef={gridRef}
+          apiRef={apiRef}
+          range={range}
+          active={active}
+          fillTarget={fillTarget}
+          editing={editing}
+          editValue={editValue}
+          freeze={freeze}
+          curSort={curSort}
+          onEditChange={setEditValue}
+          onEditKeyDown={handleCellInputKeyDown}
+          onEditBlur={() => {
+            if (skipBlurRef.current) { skipBlurRef.current = false; return }
+            commitEdit()
+          }}
+          onSort={doSort}
+          onFilter={openFilter}
+          onLayoutChange={rerender}
+          onKeyDown={handleGridKeyDown}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onDoubleClick={handleDoubleClick}
+        />
         <div className="status-line">
           <span>{summary.active ? `${summary.visible} of ${summary.total} rows` : ''}</span>
           <span>{status}</span>

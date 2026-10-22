@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { normRange, rangeLabel, fillTargetFor, pickSortRange} from './selection'
+import { normRange, rangeLabel, fillTargetFor, pickSortRange, parseRef} from './selection'
 
 describe('selection helpers', () => {
     it('normalises a backwards selection', () => {
@@ -30,4 +30,10 @@ describe('pickSortRange', () => {
         expect(pickSortRange(used, 2, used, 50, 50)).toBeUndefined()
         expect(pickSortRange({ r1: 1, c1: 0, r2: 5, c2: 3 }, 8, used, 50, 50)).toBeUndefined()
     })
+})
+
+it('parses name box input', () => {
+  expect(parseRef('AZ5000')).toEqual({ r1: 4999, c1: 51, r2: 4999, c2: 51 })
+  expect(parseRef('k2:k100000')).toEqual({ r1: 1, c1: 10, r2: 99999, c2: 10 })
+  expect(parseRef('hello')).toBe(null)
 })

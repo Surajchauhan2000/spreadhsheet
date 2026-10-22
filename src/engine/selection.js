@@ -60,3 +60,21 @@ export function pickSortRange(sel, col, used, rows, cols) {
     if (col < sel.c1 || col > sel.c2) return undefined
     return sel
 }
+
+function labelToCol(label) {
+    let n = 0
+    for (const ch of label.toUpperCase()) n = n * 26 + (ch.charCodeAt(0) - 64)
+    return n - 1
+}
+
+// "AZ5000" or "K2:K100000" (with optional $) -> normalised rect, or null if it is not a reference.
+export function parseRef(text) {
+    const m = /^\s*\$?([A-Za-z]{1,3})\$?(\d+)\s*(?::\s*\$?([A-Za-z]{1,3})\$?(\d+))?\s*$/.exec(text)
+    if (!m) return null
+    const r1 = Number(m[2]) - 1
+    const c1 = labelToCol(m[1])
+    const r2 = m[4] ? Number(m[4]) - 1 : r1
+    const c2 = m[3] ? labelToCol(m[3]) : c1
+    if (r1 < 0 || r2 < 0) return null
+    return { r1: Math.min(r1, r2), c1: Math.min(c1, c2), r2: Math.max(r1, r2), c2: Math.max(c1, c2) }
+}
