@@ -3,6 +3,21 @@
 // ─────────────────────────────────────────────────────────────
 
 const MAX_UNDO_HISTORY = 100
+const STRICT_NUM_RE = /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i
+
+// Loose coercion for arithmetic only: "$1,200.00" -> 1200, "10%" -> 0.1, "" -> 0, "N/A" -> NaN
+function toNumberLoose(v) {
+    if (typeof v === 'number') return v
+    if (typeof v !== 'string') return NaN
+    let t = v.trim()
+    if (t === '') return 0
+    let pct = false
+    if (t.endsWith('%')) { pct = true; t = t.slice(0, -1) }
+    t = t.replace(/^([-+]?)\$/, '$1').replace(/,/g, '')
+    if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(t)) return NaN
+    const n = parseFloat(t)
+    return pct ? n / 100 : n
+}
 
 // ─────────────────────────────────────────────────────────────
 //  Column / Cell coordinate utilities
@@ -326,10 +341,9 @@ function evaluateAST(ast, getCellValue, visited = new Set()) {
     if (ast.type === 'range') throw new Error('VALUE')
 
         if (ast.type === 'binary') {
-            const toNum = (v) => (v === '' ? 0 : v)
-            const leftVal = toNum(evaluateAST(ast.left, getCellValue, visited))
-            const rightVal = toNum(evaluateAST(ast.right, getCellValue, visited))
-            if (typeof leftVal !== 'number' || typeof rightVal !== 'number') throw new Error('VALUE')
+            const leftVal = toNumberLoose(evaluateAST(ast.left, getCellValue, visited))
+            const rightVal = toNumberLoose(evaluateAST(ast.right, getCellValue, visited))
+            if (Number.isNaN(leftVal) || Number.isNaN(rightVal)) throw new Error('VALUE')
             switch (ast.operator) {
             case '+': return leftVal + rightVal
             case '-': return leftVal - rightVal
@@ -348,8 +362,8 @@ function evaluateAST(ast, getCellValue, visited = new Set()) {
             visited.add(cellKey)
             const value = getCellValue(cellKey, visited)
             visited.delete(cellKey)
-            const num = parseFloat(value)
-            return isNaN(num) ? 0 : num
+            const num = toNumberLoose(value)
+            return Number.isNaN(num) ? 0 : num
         })
 
         switch (ast.name) {
@@ -537,9 +551,8 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         }
 
         if (!cell.raw.startsWith('=')) {
-            const numericValue = parseFloat(cell.raw)
             visited.delete(cellKey)
-            return isNaN(numericValue) ? cell.raw : numericValue
+            return STRICT_NUM_RE.test(cell.raw.trim()) ? parseFloat(cell.raw) : cell.raw
         }
 
         const result = evaluateFormula(cell.raw, (key) => resolveCellValue(key, visited))

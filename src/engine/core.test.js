@@ -86,3 +86,21 @@ describe('absolute references', () => {
         expect(e.getRaw(32, 11)).toBe('=$G$2*H33')
     })
 })
+
+describe('messy data coercion', () => {
+    it('formulas coerce currency and percent text', () => {
+        const e = createEngine(20, 20)
+        e.setCell(0, 0, '4')
+        e.setCell(0, 1, '$1,200.00')
+        e.setCell(0, 2, '10%')
+        e.setCell(1, 0, '=A1*B1')
+        e.setCell(1, 1, '=B1*C1')
+        expect(e.getCell(1, 0).computed).toBe(4800)
+        expect(e.getCell(1, 1).computed).toBeCloseTo(120)
+    })
+    it('does not treat dates or percents as numbers when stored', () => {
+        const e = createEngine(20, 20)
+        e.setCell(0, 0, '2024-01-03')
+        expect(e.getCell(0, 0).computed).toBe('2024-01-03')
+    })
+})
