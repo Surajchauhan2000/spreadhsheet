@@ -54,8 +54,8 @@ export default function App() {
     const onKey = (e) => {
       if (!(e.ctrlKey || e.metaKey)) return
       const el = document.activeElement
-      const nativeText = el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'))
-      if (nativeText) return
+      const inEditor = el && el.tagName === 'INPUT' && (el.classList.contains('cell-input') || el.classList.contains('formula-bar-input'))
+      if (inEditor && editingRef.current) return
       const k = e.key.toLowerCase()
       if (k === 'z' && !e.shiftKey) {
         e.preventDefault()
@@ -71,8 +71,10 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e) => {
+         if (e.defaultPrevented) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
+        e.stopPropagation()
         setAiOpen((o) => !o)
       }
     }
@@ -128,6 +130,22 @@ export default function App() {
     setEditing(null)
   }
 
+  // Ctrl+Z / Ctrl+Y while typing in a cell or the formula bar: keep what was typed,
+  // then run the ENGINE undo/redo (the browser's own text undo only steps back through keystrokes)
+  const handleEditorUndoRedo = (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return false
+    const k = e.key.toLowerCase()
+    const isUndo = k === 'z' && !e.shiftKey
+    const isRedo = k === 'y' || (k === 'z' && e.shiftKey)
+    if (!isUndo && !isRedo) return false
+    e.preventDefault()
+    skipBlurRef.current = true // the editor unmounts below; don't let its blur re-commit the old text
+    commitEdit()
+    if (isUndo) engine.undo()
+    else engine.redo()
+    rerender()
+    return true
+  }
   const moveTo = (r, c, extend = false) => {
     const rr = clamp(r, 0, engine.rows - 1)
     const cc = clamp(c, 0, engine.cols - 1)
@@ -157,6 +175,7 @@ export default function App() {
   }
 
   const handleCellInputKeyDown = (e) => {
+      if (handleEditorUndoRedo(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       commitEdit()
@@ -176,6 +195,7 @@ export default function App() {
   }
   const handleBarKeyDown = (e) => {
     if (!editing) return
+    if (handleEditorUndoRedo(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       commitEdit()
