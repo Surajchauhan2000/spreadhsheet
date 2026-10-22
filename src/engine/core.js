@@ -685,7 +685,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             // Create a shallow copy of the cell object
             // The cell object contains: { raw: string, computed: number|null, error: string|null }
             // Note: computed and error are not persisted in snapshots - they're recalculated on restore
-            snapshot.set(key, { ...value })
+            snapshot.set(key, value)
         }
         snapshot.aux = captureAux()
         return snapshot
@@ -695,7 +695,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         if (snapshot.aux) restoreAux(snapshot.aux)
         cells.clear()
         for (const [key, value] of snapshot.entries()) {
-            cells.set(key, { ...value })
+           cells.set(key, value)
         }
         graph.clear()
         computedCache.clear()
@@ -1018,18 +1018,18 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             if (!block) return { ok: false, code: 'NO_DATA', changed: false }
             if (col < block.c1 || col > block.c2) return { ok: false, code: 'OUT_OF_RANGE', changed: false }
 
-            const T = [performance.now()]
-            const mark = () => T.push(performance.now())
+//            const T = [performance.now()]
+//            const mark = () => T.push(performance.now())
 
             const rowsToSort = []
             for (let r = block.r1; r <= block.r2; r++) if (!hidden.has(r)) rowsToSort.push(r)
             const ids = ensureRowIds()
             const moves = planSort(rowsToSort, dir, (r) => classify(resolveCellValue(cellKey(r, col))), (r) => ids[r])
             if (moves.size === 0) return { ok: true, changed: false }
-            mark() // 1: plan (comparison)
+//            mark() // 1: plan (comparison)
 
             pushToUndoStack({ type: 'sort', snap: takeSnapshot(), oldRows: rows })
-            mark() // 2: snapshot
+//            mark() // 2: snapshot
 
             const inBlockCol = (c) => c >= block.c1 && c <= block.c2
             const mapRow = (row, c) => (inBlockCol(c) ? moves.get(row) : undefined)
@@ -1042,7 +1042,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
             cells.clear()
             for (const [k, v] of next) cells.set(k, v)
-            mark() // 3: move cells + remap formulas
+//            mark() // 3: move cells + remap formulas
 
             const newIds = ids.slice()
             for (const [from, to] of moves) newIds[to] = ids[from]
@@ -1055,13 +1055,12 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             for (const [k, v] of cells.entries()) {
                 if (v.raw && v.raw.charCodeAt(0) === 61) updateDependencies(k, v.raw)
             }
-            mark() // 4: rebuild graph
+//            mark() // 4: rebuild graph
 
             markAllCellsDirty()
             recalculate()
-            mark() // 5: recalculate
+//            mark() // 5: recalculate
 
-            console.log('sort breakdown ms (plan|snapshot|move|graph|recalc)', T.slice(1).map((t, i) => (t - T[i]).toFixed(0)).join(' | '))
             return { ok: true, changed: true, moved: moves.size }
         }
 

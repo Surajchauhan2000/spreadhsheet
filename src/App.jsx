@@ -6,6 +6,8 @@ import { normRange, sameRect, rangeLabel, columnLabel, fillTargetFor, pickSortRa
 import VirtualGrid from './VirtualGrid.jsx'
 import { loadSampleSmall, loadSampleLarge } from './fixtures/loadSample.js'
 import FilterMenu from './engine/FilterMenu.jsx'
+import AiPanel from './AiPanel.jsx'
+import { createProvider } from './ai/provider.js'
 
 const TOTAL_ROWS = 100000
 const TOTAL_COLS = 200
@@ -37,6 +39,8 @@ export default function App() {
   const apiRef = useRef(null)                      // VirtualGrid's scrollToCell / pageRows
   const [freeze, setFreeze] = useState({ rows: 0, cols: 0 })
   const [nameEdit, setNameEdit] = useState(null)   // text typed in the name box (null = show selection label)
+  const [aiOpen, setAiOpen] = useState(false)
+  const [provider] = useState(() => createProvider())
 
   const rerender = () => setVersion((v) => v + 1)
   const range = normRange(sel)
@@ -63,6 +67,17 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [engine])
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setAiOpen((o) => !o)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // Give the keyboard back to the grid whenever editing ends
   useEffect(() => {
@@ -481,6 +496,7 @@ const doSort = (col) => {
           <div className="toolbar-group">
             <button className={`toolbar-btn ${freeze.rows ? 'active' : ''}`} onClick={() => setFreeze((f) => ({ ...f, rows: f.rows ? 0 : 1 }))} title="Freeze row 1">❄ Row 1</button>
             <button className={`toolbar-btn ${freeze.cols ? 'active' : ''}`} onClick={() => setFreeze((f) => ({ ...f, cols: f.cols ? 0 : 1 }))} title="Freeze column A">❄ Col A</button>
+            <button className={`toolbar-btn ${aiOpen ? 'active' : ''}`} onClick={() => setAiOpen((o) => !o)} title="Ask AI (Ctrl+K)">✨ Ask AI</button>
           </div>
 
           <div className="toolbar-group">
@@ -561,6 +577,17 @@ const doSort = (col) => {
                 />
               </>
             )}
+
+        {aiOpen && (
+                <AiPanel
+                  engine={engine}
+                  provider={provider}
+                  activeLabel={columnLabel(active.c) + (active.r + 1)}
+                  selectionLabel={rangeLabel(range)}
+                  onChange={rerender}
+                  onClose={() => { setAiOpen(false); gridRef.current?.focus({ preventScroll: true }) }}
+                />
+              )}
     </div>
   )
 }

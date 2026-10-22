@@ -505,3 +505,24 @@ body {
 .resizer-col:hover, .resizer-row:hover { background: rgba(26, 115, 232, 0.4); }
 .name-box { width: 110px; font-family: inherit; outline: none; }
 .main-content > .vg-scroll { flex: 1 1 0; min-height: 200px; }
+
+/* ── AI panel ── */
+.ai-panel { position: fixed; top: 0; right: 0; bottom: 0; width: 420px; z-index: 200; background: #fff; border-left: 1px solid #dadce0; box-shadow: -4px 0 12px rgba(0,0,0,.15); display: flex; flex-direction: column; }
+.ai-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e0e0e0; }
+.ai-provider { font-size: 11px; background: #e8f0fe; color: #1a73e8; padding: 2px 6px; border-radius: 4px; }
+.ai-toggle { margin-left: auto; font-size: 12px; color: #5f6368; display: flex; align-items: center; gap: 4px; }
+.ai-body { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+.ai-card { border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.ai-prompt { font-weight: 600; font-size: 13px; }
+.ai-desc, .ai-meta { font-size: 12px; color: #5f6368; }
+.ai-err { font-size: 12px; color: #d93025; background: #fce8e6; padding: 8px; border-radius: 4px; }
+.ai-clarify { font-size: 13px; background: #fff8e1; padding: 8px; border-radius: 4px; }
+.ai-table-wrap { max-height: 240px; overflow: auto; border: 1px solid #e0e0e0; border-radius: 4px; }
+.ai-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.ai-table th, .ai-table td { border-bottom: 1px solid #eee; padding: 3px 6px; text-align: left; white-space: nowrap; color: #202124; }
+.ai-table th { position: sticky; top: 0; background: #f8f9fa; }
+.ai-actions { display: flex; gap: 6px; align-items: center; }
+.ai-where { width: 70px; }
+.ai-plan { font-size: 11px; background: #f8f9fa; padding: 8px; border-radius: 4px; overflow: auto; max-height: 200px; color: #202124; }
+.ai-input-row { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid #e0e0e0; }
+.ai-input { flex: 1; color: #202124; }

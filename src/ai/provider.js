@@ -32,6 +32,7 @@ import { createMockProvider } from './mockProvider.js'
 const env = (typeof import.meta !== 'undefined' && import.meta.env) || {}
 
 /** @returns {Provider} */
+/** @returns {Provider} Any OpenAI-compatible chat-completions endpoint (OpenAI, Gemini's compat endpoint, Groq, OpenRouter, Ollama...). */
 export function createHttpProvider(config = {}) {
     const endpoint = config.endpoint ?? env.VITE_AI_ENDPOINT
     const apiKey = config.apiKey ?? env.VITE_AI_API_KEY
@@ -39,15 +40,40 @@ export function createHttpProvider(config = {}) {
 
     return {
         name: 'http',
-        async complete(request) {
-            // TODO (candidate): call the LLM API of your choice with fetch().
-            //   - send request.system as the system prompt, request.history then
-            //     request.user as the conversation turns
-            //   - return { text: <model text>, provider: 'http' }
-            //   - surface network / auth / rate-limit failures as thrown Errors
-            //     with a readable message; the UI must show them, never swallow them
-            void endpoint; void apiKey; void model; void request
-            throw new Error('createHttpProvider is not implemented yet — wire it to the API of your choice (src/ai/provider.js)')
+        async complete({ system, user, history = [] }) {
+            if (!endpoint || !model) {
+                throw new Error('HTTP provider is not configured: set VITE_AI_ENDPOINT and VITE_AI_MODEL (and VITE_AI_API_KEY) in .env.local, then restart the dev server')
+            }
+            const messages = [
+                { role: 'system', content: system },
+                ...history.map(({ role, content }) => ({ role, content })),
+                { role: 'user', content: user },
+            ]
+            let res
+            try {
+                res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+                    body: JSON.stringify({ model, messages, temperature: 0 }),
+                })
+            } catch (e) {
+                throw new Error(`Network error: could not reach the AI endpoint (${e.message})`)
+            }
+            if (!res.ok) {
+                const body = (await res.text().catch(() => '')).slice(0, 300)
+                if (res.status === 401 || res.status === 403) throw new Error(`Authentication failed (${res.status}): check VITE_AI_API_KEY. ${body}`)
+                if (res.status === 429) throw new Error(`Rate limited (429): wait a moment and retry. ${body}`)
+                throw new Error(`AI provider error ${res.status}: ${body}`)
+            }
+            let data
+            try {
+                data = await res.json()
+            } catch {
+                throw new Error('The AI endpoint returned a response that is not JSON')
+            }
+            const text = data?.choices?.[0]?.message?.content
+            if (typeof text !== 'string' || text === '') throw new Error('The AI endpoint returned no message content')
+            return { text, provider: 'http' }
         },
     }
 }
