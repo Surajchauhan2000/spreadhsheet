@@ -2,14 +2,21 @@ import { useState, useRef, useEffect } from 'react'
 import './App.css'
 import { createEngine } from './engine/core.js'
 import { fillRange } from './engine/fillRange.js'
-import { normRange, inRange, sameRect, rangeLabel, columnLabel, fillTargetFor } from './engine/selection.js'
+import { normRange, inRange, sameRect, rangeLabel, columnLabel, fillTargetFor, pickSortRange } from './engine/selection.js'
 import { loadSampleSmall, loadSampleLarge } from './fixtures/loadSample.js'
+import FilterMenu from './engine/FilterMenu.jsx'
 
 const TOTAL_ROWS = 50
 const TOTAL_COLS = 50
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 const single = (r, c) => ({ anchor: { r, c }, focus: { r, c } })
+// Times a function call. Lives outside the component so the purity lint rule doesn't flag it.
+function timed(fn) {
+  const t0 = performance.now()
+  const result = fn()
+  return { result, ms: performance.now() - t0 }
+}
 
 function formatComputed(v) {
   if (typeof v === 'number') return String(Math.round(v * 1e10) / 1e10)
@@ -24,6 +31,9 @@ export default function App() {
   const [editing, setEditing] = useState(null) // { r, c, source: 'cell' | 'bar' }
   const [editValue, setEditValue] = useState('')
   const [fillTarget, setFillTarget] = useState(null)
+  const [menu, setMenu] = useState(null)           // { col, x, y } while a filter dropdown is open
+  const [sortState, setSortState] = useState(null) // { col, dir, depth }: drives header arrow + click cycle
+  const [status, setStatus] = useState('')
   const gridRef = useRef(null)
   const dragRef = useRef(null)
   const skipBlurRef = useRef(false)
@@ -195,6 +205,7 @@ export default function App() {
     if (e.button !== 0 || e.target.tagName === 'INPUT') return
     const hit = hitTest(e)
     if (!hit) return
+    if (hit.kind === 'sort' || hit.kind === 'filter') return
     e.preventDefault()
     if (editing) commitEdit()
     gridRef.current?.focus({ preventScroll: true })
@@ -311,6 +322,30 @@ export default function App() {
     rerender()
   }
 
+  // ────── Sort / filter ──────
+
+  // The arrow is valid only while the sort is still the latest undo step, so undo/redo keep it honest
+  const curSort = sortState && sortState.depth === engine.undoDepth() ? sortState : null
+  const summary = engine.getFilterSummary()
+
+const doSort = (col) => {
+  const dir = curSort && curSort.col === col ? { asc: 'desc', desc: 'original' }[curSort.dir] : 'asc'
+  const { result: res, ms } = timed(() =>
+    engine.sortRows({ col, dir, range: pickSortRange(range, col, engine.getUsedRange(), engine.rows, engine.cols) })
+  )
+  if (!res.ok) setStatus(res.code === 'NO_DATA' ? 'Nothing to sort' : `Column ${columnLabel(col)} is outside the data`)
+  else if (!res.changed) setStatus('Already in that order')
+  else setStatus(`Sorted column ${columnLabel(col)} (${dir}) in ${ms.toFixed(0)} ms`)
+  setSortState(dir === 'original' ? null : { col, dir, depth: engine.undoDepth() })
+  rerender()
+  gridRef.current?.focus({ preventScroll: true })
+}
+
+  const openFilter = (e, col) => {
+    const rect = e.currentTarget.getBoundingClientRect()
+    setMenu({ col, x: Math.min(rect.left, window.innerWidth - 270), y: rect.bottom + 4 })
+  }
+
   // ────── Derived ──────
 
   const formulaBarValue = editing ? editValue : engine.getRaw(active.r, active.c)
@@ -386,6 +421,8 @@ export default function App() {
           <div className="toolbar-group">
             <button className="toolbar-btn danger" onClick={clearSelection}>✕ Selection</button>
             <button className="toolbar-btn danger" onClick={clearAllCells}>✕ All</button>
+            <button className="toolbar-btn" onClick={() => { if (engine.clearFilters()) rerender() }} disabled={!engine.hasFilters()}>Clear filters</button>
+
           </div>
 
           <div className="toolbar-group">
@@ -427,14 +464,19 @@ export default function App() {
                     data-c={c}
                     className={`col-header ${c >= range.c1 && c <= range.c2 ? 'hdr-sel' : ''}`}
                   >
-                    {columnLabel(c)}
+                    <span className="hdr-label">{columnLabel(c)}</span>
+                    <button className={`hdr-btn ${curSort?.col === c ? 'on' : ''}`} data-kind="sort" title="Sort: ascending, descending, original" onClick={() => doSort(c)}>
+                      {curSort?.col === c ? (curSort.dir === 'asc' ? '▲' : '▼') : '⇅'}
+                    </button>
+                    <button className={`hdr-btn ${engine.getFilter(c) ? 'on' : ''}`} data-kind="filter" title="Filter" onClick={(e) => openFilter(e, c)}>▾</button>
+
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {Array.from({ length: engine.rows }, (_, r) => (
-                <tr key={r}>
+               <tr key={r} style={engine.isRowHidden(r) ? { display: 'none' } : undefined}>
                   <td
                     data-kind="row"
                     data-r={r}
@@ -518,11 +560,29 @@ export default function App() {
             </tbody>
           </table>
         </div>
-
+        <div className="status-line">
+          <span>{summary.active ? `${summary.visible} of ${summary.total} rows` : ''}</span>
+          <span>{status}</span>
+        </div>
         <p className="footer-hint">
           Click = select · Drag / Shift+Click / Shift+Arrow = range · Double-click, Enter, F2 or just type = edit · Delete clears · Ctrl+A used range · Drag the blue square to fill · Ctrl+Z / Ctrl+Y
         </p>
       </div>
+            {menu && (
+              <>
+                <div className="fm-backdrop" onMouseDown={() => setMenu(null)} />
+                <FilterMenu
+                  key={menu.col}
+                  engine={engine}
+                  col={menu.col}
+                  label={columnLabel(menu.col)}
+                  x={menu.x}
+                  y={menu.y}
+                  onClose={() => setMenu(null)}
+                  onChange={(spec) => { engine.setFilter(menu.col, spec); rerender() }}
+                />
+              </>
+            )}
     </div>
   )
 }

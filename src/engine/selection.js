@@ -49,3 +49,14 @@ export function fillTargetFor(S, pr, pc) {
     if (v >= h) return { ...S, r1: S.r1 - Math.max(up, 0), r2: S.r2 + Math.max(down, 0) }
     return { ...S, c1: S.c1 - Math.max(left, 0), c2: S.c2 + Math.max(right, 0) }
 }
+
+// Which rectangle should a header sort use? undefined = let the engine use the used range
+// (single cell, whole row/column, the full used range, or a column outside the selection).
+export function pickSortRange(sel, col, used, rows, cols) {
+    const single = sel.r1 === sel.r2 && sel.c1 === sel.c2
+    const fullCol = sel.r1 === 0 && sel.r2 === rows - 1
+    const fullRow = sel.c1 === 0 && sel.c2 === cols - 1
+    if (single || fullCol || fullRow || (used && sameRect(sel, used))) return undefined
+    if (col < sel.c1 || col > sel.c2) return undefined
+    return sel
+}
