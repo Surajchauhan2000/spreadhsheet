@@ -1,6 +1,6 @@
 import { toNumberLoose, classify, compileFilter, distinctValues } from './values.js'
 import { planSort } from './sortPlan.js'
-
+import { DEFAULT_COL_W, DEFAULT_ROW_H, MIN_SIZE } from './layout.js'
 // ─────────────────────────────────────────────────────────────
 //  Operator precedence for expression parsing
 // ─────────────────────────────────────────────────────────────
@@ -63,26 +63,18 @@ function createDependencyGraph() {
     }
 
     function removeAllDependencies(cell) {
+        // Only this cell's OWN precedents. Its dependents keep pointing at it,
+        // because they still read this cell (even if it is now blank).
         const deps = forwardEdges.get(cell)
-        if (deps) {
-            for (const dep of deps) {
-                if (reverseEdges.has(dep)) {
-                    reverseEdges.get(dep).delete(cell)
-                    if (reverseEdges.get(dep).size === 0) reverseEdges.delete(dep)
-                }
+        if (!deps) return
+        for (const dep of deps) {
+            const rev = reverseEdges.get(dep)
+            if (rev) {
+                rev.delete(cell)
+                if (rev.size === 0) reverseEdges.delete(dep)
             }
-            forwardEdges.delete(cell)
         }
-        const dependents = reverseEdges.get(cell)
-        if (dependents) {
-            for (const dependent of dependents) {
-                if (forwardEdges.has(dependent)) {
-                    forwardEdges.get(dependent).delete(cell)
-                    if (forwardEdges.get(dependent).size === 0) forwardEdges.delete(dependent)
-                }
-            }
-            reverseEdges.delete(cell)
-        }
+        forwardEdges.delete(cell)
     }
 
     function getDependencies(cell) {
@@ -505,6 +497,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     // Filters are a view: col -> spec, plus the set of row indexes they hide.
     let filters = new Map()
     let hidden = new Set()
+    let colWidths = new Map()   // col -> px, only non-default (sparse)
+    let rowHeights = new Map()  // row -> px, only non-default
+    let _layoutVersion = 0      // UI rebuilds prefix sums only when this changes
 
     // Internal generation counter — incremented on every structural mutation.
     // Used by the cache to validate entries and by the engine to track state integrity.
@@ -735,6 +730,8 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         rows++
+        rowHeights = shiftSizeKeys(rowHeights, atIndex, false)
+        _layoutVersion++
          if (rowIds) rowIds.splice(atIndex, 0, nextRowId++)
                 hidden = new Set([...hidden].map((r) => (r >= atIndex ? r + 1 : r)))
         for (const [key, value] of cells.entries()) {
@@ -763,6 +760,8 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         rows--
+        rowHeights = shiftSizeKeys(rowHeights, atIndex, true)
+        _layoutVersion++
         if (rowIds) rowIds.splice(atIndex, 1)
                 hidden = new Set([...hidden].filter((r) => r !== atIndex).map((r) => (r > atIndex ? r - 1 : r)))
 
@@ -791,6 +790,8 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         cols++
+        colWidths = shiftSizeKeys(colWidths, atIndex, false)
+        _layoutVersion++
           filters = new Map([...filters].map(([c, s]) => [c >= atIndex ? c + 1 : c, s]))
         for (const [key, value] of cells.entries()) {
             if (value.raw.startsWith('=')) updateDependencies(key, value.raw)
@@ -818,6 +819,8 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
         }
         cols--
+        colWidths = shiftSizeKeys(colWidths, atIndex, false)
+        _layoutVersion++
         filters = new Map([...filters].filter(([c]) => c !== atIndex).map(([c, s]) => [c > atIndex ? c - 1 : c, s]))
         for (const [key, value] of cells.entries()) {
             if (value.raw.startsWith('=')) updateDependencies(key, value.raw)
@@ -841,7 +844,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             pushToUndoStack({ type: 'set', r: row, c: col, oldVal: previousValue, newVal: value })
         }
         setCellRaw(row, col, value)
-        _generation++
+//        _generation++
         recalculate()
     }
 
@@ -861,7 +864,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
             if (records.length === 0) return false // no-op: no undo entry
             pushToUndoStack({ type: 'batch', records })
-            _generation++
+//            _generation++
             recalculate()
             return true
         }
@@ -896,14 +899,20 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     // ── Sort / filter support ──
 
     function captureAux() {
-        return { rowIds: rowIds ? rowIds.slice() : null, nextRowId, filters: new Map(filters), hidden: new Set(hidden) }
+        return {
+            rowIds: rowIds ? rowIds.slice() : null, nextRowId,
+            filters: new Map(filters), hidden: new Set(hidden),
+            colWidths: new Map(colWidths), rowHeights: new Map(rowHeights),
+        }
     }
-
     function restoreAux(aux) {
         rowIds = aux.rowIds ? aux.rowIds.slice() : null
         nextRowId = aux.nextRowId
         filters = new Map(aux.filters)
         hidden = new Set(aux.hidden)
+        colWidths = new Map(aux.colWidths ?? [])
+        rowHeights = new Map(aux.rowHeights ?? [])
+        _layoutVersion++
     }
 
     function ensureRowIds() {
@@ -948,6 +957,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
 
     function recomputeHidden() {
         hidden = new Set()
+        _layoutVersion++
         if (filters.size === 0) return
         const block = getDataBlock()
         if (!block) return
@@ -973,6 +983,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         pushToUndoStack({ type: 'filter', snap: takeSnapshot(), oldRows: rows })
         filters = new Map()
         hidden = new Set()
+        _layoutVersion++
         return true
     }
 
@@ -1001,47 +1012,58 @@ export function createEngine(initialRows = 50, initialCols = 50) {
      * With a filter active only visible rows are reordered.
      * Formulas anywhere in the sheet that point at a moved row follow it; ranges are untouched.
      */
-    function executeSort({ col, dir = 'asc', range } = {}) {
-        if (!['asc', 'desc', 'original'].includes(dir)) return { ok: false, code: 'BAD_ARGS', changed: false }
-        const block = range ? { r1: range.r1, r2: range.r2, c1: range.c1, c2: range.c2 } : getDataBlock()
-        if (!block) return { ok: false, code: 'NO_DATA', changed: false }
-        if (col < block.c1 || col > block.c2) return { ok: false, code: 'OUT_OF_RANGE', changed: false }
+     function executeSort({ col, dir = 'asc', range } = {}) {
+            if (!['asc', 'desc', 'original'].includes(dir)) return { ok: false, code: 'BAD_ARGS', changed: false }
+            const block = range ? { r1: range.r1, r2: range.r2, c1: range.c1, c2: range.c2 } : getDataBlock()
+            if (!block) return { ok: false, code: 'NO_DATA', changed: false }
+            if (col < block.c1 || col > block.c2) return { ok: false, code: 'OUT_OF_RANGE', changed: false }
 
-        const rowsToSort = []
-        for (let r = block.r1; r <= block.r2; r++) if (!hidden.has(r)) rowsToSort.push(r)
-        const ids = ensureRowIds()
-        const moves = planSort(rowsToSort, dir, (r) => classify(resolveCellValue(cellKey(r, col))), (r) => ids[r])
-        if (moves.size === 0) return { ok: true, changed: false }
+            const T = [performance.now()]
+            const mark = () => T.push(performance.now())
 
-        pushToUndoStack({ type: 'sort', snap: takeSnapshot(), oldRows: rows })
+            const rowsToSort = []
+            for (let r = block.r1; r <= block.r2; r++) if (!hidden.has(r)) rowsToSort.push(r)
+            const ids = ensureRowIds()
+            const moves = planSort(rowsToSort, dir, (r) => classify(resolveCellValue(cellKey(r, col))), (r) => ids[r])
+            if (moves.size === 0) return { ok: true, changed: false }
+            mark() // 1: plan (comparison)
 
-        const inBlockCol = (c) => c >= block.c1 && c <= block.c2
-        const mapRow = (row, c) => (inBlockCol(c) ? moves.get(row) : undefined)
-        const next = new Map()
-        for (const [key, cell] of cells.entries()) {
-            const p = cellCoords(key)
-            const raw = cell.raw && cell.raw.charCodeAt(0) === 61 ? remapRowReferences(cell.raw, mapRow) : cell.raw
-            const dest = inBlockCol(p.col) ? moves.get(p.row) : undefined
-            next.set(dest === undefined ? key : cellKey(dest, p.col), raw === cell.raw ? cell : { ...cell, raw })
+            pushToUndoStack({ type: 'sort', snap: takeSnapshot(), oldRows: rows })
+            mark() // 2: snapshot
+
+            const inBlockCol = (c) => c >= block.c1 && c <= block.c2
+            const mapRow = (row, c) => (inBlockCol(c) ? moves.get(row) : undefined)
+            const next = new Map()
+            for (const [key, cell] of cells.entries()) {
+                const p = cellCoords(key)
+                const raw = cell.raw && cell.raw.charCodeAt(0) === 61 ? remapRowReferences(cell.raw, mapRow) : cell.raw
+                const dest = inBlockCol(p.col) ? moves.get(p.row) : undefined
+                next.set(dest === undefined ? key : cellKey(dest, p.col), raw === cell.raw ? cell : { ...cell, raw })
+            }
+            cells.clear()
+            for (const [k, v] of next) cells.set(k, v)
+            mark() // 3: move cells + remap formulas
+
+            const newIds = ids.slice()
+            for (const [from, to] of moves) newIds[to] = ids[from]
+            rowIds = newIds
+
+            graph.clear()
+            computedCache.clear()
+            dirtyCells.clear()
+            _generation++
+            for (const [k, v] of cells.entries()) {
+                if (v.raw && v.raw.charCodeAt(0) === 61) updateDependencies(k, v.raw)
+            }
+            mark() // 4: rebuild graph
+
+            markAllCellsDirty()
+            recalculate()
+            mark() // 5: recalculate
+
+            console.log('sort breakdown ms (plan|snapshot|move|graph|recalc)', T.slice(1).map((t, i) => (t - T[i]).toFixed(0)).join(' | '))
+            return { ok: true, changed: true, moved: moves.size }
         }
-        cells.clear()
-        for (const [k, v] of next) cells.set(k, v)
-
-        const newIds = ids.slice()
-        for (const [from, to] of moves) newIds[to] = ids[from]
-        rowIds = newIds
-
-        graph.clear()
-        computedCache.clear()
-        dirtyCells.clear()
-        _generation++
-        for (const [k, v] of cells.entries()) {
-            if (v.raw && v.raw.charCodeAt(0) === 61) updateDependencies(k, v.raw)
-        }
-        markAllCellsDirty()
-        recalculate()
-        return { ok: true, changed: true, moved: moves.size }
-    }
 
     function executeInsertRow(atIndex) {
         const snapshot = takeSnapshot()
@@ -1076,9 +1098,48 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         recomputeHidden()
     }
 
+// Re-key a sparse size map after inserting/deleting an index.
+function shiftSizeKeys(map, atIndex, isDelete) {
+    const next = new Map()
+    for (const [k, v] of map) {
+        if (isDelete) {
+            if (k === atIndex) continue
+            next.set(k > atIndex ? k - 1 : k, v)
+        } else {
+            next.set(k >= atIndex ? k + 1 : k, v)
+        }
+    }
+    return next
+}
+
+function applySize(kind, index, value) {
+    const map = kind === 'col' ? colWidths : rowHeights
+    const def = kind === 'col' ? DEFAULT_COL_W : DEFAULT_ROW_H
+    if (value === def) map.delete(index)
+    else map.set(index, value)
+    _layoutVersion++
+}
+
+// ONE undo step, no cell snapshot (cheap).
+function executeSetSize(kind, index, value) {
+    const map = kind === 'col' ? colWidths : rowHeights
+    const def = kind === 'col' ? DEFAULT_COL_W : DEFAULT_ROW_H
+    const oldVal = map.get(index) ?? def
+    const newVal = Math.max(MIN_SIZE, Math.round(value))
+    if (newVal === oldVal) return false
+    pushToUndoStack({ type: 'size', kind, index, oldVal, newVal })
+    applySize(kind, index, newVal)
+    return true
+}
+
     function undo() {
         if (undoStack.length === 0) return false
         const entry = undoStack.pop()
+        if (entry.type === 'size') {
+            applySize(entry.kind, entry.index, entry.oldVal)
+            redoStack.push(entry)
+            return true
+        }
         if (entry.type === 'batch') {
             for (let i = entry.records.length - 1; i >= 0; i--) {
                 const rec = entry.records[i]
@@ -1086,7 +1147,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
                 setStyleRaw(rec.row, rec.col, rec.oldStyle)
             }
             redoStack.push(entry)
-            _generation++
+//            _generation++
             recalculate()
             return true
         }
@@ -1095,7 +1156,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             const currentValue = getCellRaw(entry.r, entry.c).raw
             redoStack.push({ ...entry, newVal: currentValue })
             setCellRaw(entry.r, entry.c, entry.oldVal)
-            _generation++
+//            _generation++
             recalculate()
         } else {
             // For structural changes (row/col insert/delete), save current state to redo
@@ -1120,13 +1181,18 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function redo() {
         if (redoStack.length === 0) return false
         const entry = redoStack.pop()
+        if (entry.type === 'size') {
+            applySize(entry.kind, entry.index, entry.newVal)
+            undoStack.push(entry)
+            return true
+        }
         if (entry.type === 'batch') {
             for (const rec of entry.records) {
                 setCellRaw(rec.row, rec.col, rec.newRaw)
                 setStyleRaw(rec.row, rec.col, rec.newStyle)
             }
             undoStack.push(entry)
-            _generation++
+//            _generation++
             recalculate()
             return true
         }
@@ -1135,7 +1201,7 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             const currentValue = getCellRaw(entry.r, entry.c).raw
             undoStack.push({ ...entry, oldVal: currentValue })
             setCellRaw(entry.r, entry.c, entry.newVal)
-            _generation++
+//            _generation++
             recalculate()
         } else {
             undoStack.push({
@@ -1211,6 +1277,11 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         getFilterSummary,
         getDistinctValues,
         getRowId: (r) => (rowIds ? rowIds[r] : r),
+        getColWidth: (c) => colWidths.get(c) ?? DEFAULT_COL_W,
+        getRowHeight: (r) => (hidden.has(r) ? 0 : (rowHeights.get(r) ?? DEFAULT_ROW_H)),
+        setColWidth: (c, w) => executeSetSize('col', c, w),
+        setRowHeight: (r, h) => executeSetSize('row', r, h),
+        layoutVersion: () => _layoutVersion,
         // Internal state is not exposed - if you need to serialize/deserialize,
         // you'll need to work with the public API or add new methods
     }

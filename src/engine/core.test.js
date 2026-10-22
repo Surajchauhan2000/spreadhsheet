@@ -103,4 +103,23 @@ describe('messy data coercion', () => {
         e.setCell(0, 0, '2024-01-03')
         expect(e.getCell(0, 0).computed).toBe('2024-01-03')
     })
+    it('editing a precedent recalculates only its dependents', () => {
+      const e = createEngine(10, 10)
+      e.setCell(0, 0, '2')
+      e.setCell(0, 1, '=A1*2')
+      e.setCell(0, 0, '5')
+      expect(e.getCell(0, 1).computed).toBe(10)
+      e.undo()
+      expect(e.getCell(0, 1).computed).toBe(4)
+    })
+
+    it('column width follows its column on insert, and undo restores', () => {
+      const e = createEngine(10, 10)
+      e.setColWidth(3, 300)
+      e.insertColumn(3)
+      expect(e.getColWidth(3)).toBe(100)
+      expect(e.getColWidth(4)).toBe(300)
+      e.undo()
+      expect(e.getColWidth(3)).toBe(300)
+    })
 })
