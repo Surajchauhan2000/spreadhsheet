@@ -1,6 +1,7 @@
 import { useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { createAxis, DEFAULT_ROW_H, MIN_SIZE } from './engine/layout.js'
 import { columnLabel, inRange } from './engine/selection.js'
+import { cellDisplay } from './engine/numberFormat.js'
 
 const HDR_H = 28 // column header height
 const RH_W = 56 // row header width
@@ -16,15 +17,8 @@ function textWidth(text) {
   return measureCtx.measureText(text).width
 }
 
-function formatComputed(v) {
-  if (typeof v === 'number') return String(Math.round(v * 1e10) / 1e10)
-  return v == null ? '' : String(v)
-}
+const cellText = cellDisplay
 
-function cellText(cell) {
-  if (cell.error) return cell.error
-  return cell.raw.startsWith('=') ? formatComputed(cell.computed) : cell.raw
-}
 
 function spans(a, b) {
   const out = []

@@ -500,6 +500,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     let colWidths = new Map()   // col -> px, only non-default (sparse)
     let rowHeights = new Map()  // row -> px, only non-default
     let _layoutVersion = 0      // UI rebuilds prefix sums only when this changes
+    let frozenRows = 0
+    let frozenCols = 0
+
 
     // Internal generation counter — incremented on every structural mutation.
     // Used by the cache to validate entries and by the engine to track state integrity.
@@ -848,26 +851,41 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         recalculate()
     }
 
-        // One undo step for any number of cell/style writes. One recalculation at the end.
-        // changes: [{ row, col, raw?, style? }]  (raw/style undefined = keep, style null = clear)
-        function executeBatch(changes) {
-            const records = []
-            for (const ch of changes) {
-                const prev = getCellRaw(ch.row, ch.col)
-                const newRaw = ch.raw === undefined ? prev.raw : ch.raw
-                const newStyle = ch.style === undefined ? prev.style : (ch.style === null ? undefined : ch.style)
-                const sameStyle = JSON.stringify(newStyle ?? null) === JSON.stringify(prev.style ?? null)
-                if (newRaw === prev.raw && sameStyle) continue
-                records.push({ row: ch.row, col: ch.col, oldRaw: prev.raw, newRaw, oldStyle: prev.style, newStyle })
-                if (newRaw !== prev.raw) setCellRaw(ch.row, ch.col, newRaw)
-                if (!sameStyle) setStyleRaw(ch.row, ch.col, newStyle)
-            }
-            if (records.length === 0) return false // no-op: no undo entry
-            pushToUndoStack({ type: 'batch', records })
-//            _generation++
-            recalculate()
-            return true
+    // ONE undo step for any number of cell/style writes, column widths and freeze changes.
+    // changes: [{ row, col, raw?, style? }]  (raw/style undefined = keep, style null = clear)
+    // extras:  { widths?: [{col, width}], freezeRows?: number, freezeCols?: number }
+    function executeBatch(changes, extras = {}) {
+        const records = []
+        for (const ch of changes) {
+            const prev = getCellRaw(ch.row, ch.col)
+            const newRaw = ch.raw === undefined ? prev.raw : ch.raw
+            const newStyle = ch.style === undefined ? prev.style : (ch.style === null ? undefined : ch.style)
+            const sameStyle = JSON.stringify(newStyle ?? null) === JSON.stringify(prev.style ?? null)
+            if (newRaw === prev.raw && sameStyle) continue
+            records.push({ row: ch.row, col: ch.col, oldRaw: prev.raw, newRaw, oldStyle: prev.style, newStyle })
+            if (newRaw !== prev.raw) setCellRaw(ch.row, ch.col, newRaw)
+            if (!sameStyle) setStyleRaw(ch.row, ch.col, newStyle)
         }
+        const sizeRecs = []
+        for (const w of extras.widths ?? []) {
+            const oldW = colWidths.get(w.col) ?? DEFAULT_COL_W
+            const newW = Math.max(MIN_SIZE, Math.round(w.width))
+            if (oldW !== newW) sizeRecs.push({ col: w.col, oldW, newW })
+        }
+        const freeze = {}
+        const fr = extras.freezeRows
+        if (fr !== undefined && fr !== null && fr !== frozenRows) freeze.rows = [frozenRows, fr]
+        const fc = extras.freezeCols
+        if (fc !== undefined && fc !== null && fc !== frozenCols) freeze.cols = [frozenCols, fc]
+        const hasFreeze = !!(freeze.rows || freeze.cols)
+        if (records.length === 0 && sizeRecs.length === 0 && !hasFreeze) return false // no-op: no undo entry
+        for (const s of sizeRecs) applySize('col', s.col, s.newW)
+        if (freeze.rows) frozenRows = freeze.rows[1]
+        if (freeze.cols) frozenCols = freeze.cols[1]
+        pushToUndoStack({ type: 'batch', records, sizeRecs, freeze: hasFreeze ? freeze : null })
+        recalculate()
+        return true
+    }
 
         // Clear values (not styles) in a rectangle: one undo step.
         function executeClear(range) {
@@ -898,22 +916,26 @@ export function createEngine(initialRows = 50, initialCols = 50) {
 
     // ── Sort / filter support ──
 
-    function captureAux() {
-        return {
-            rowIds: rowIds ? rowIds.slice() : null, nextRowId,
-            filters: new Map(filters), hidden: new Set(hidden),
-            colWidths: new Map(colWidths), rowHeights: new Map(rowHeights),
+        function captureAux() {
+            return {
+                rowIds: rowIds ? rowIds.slice() : null, nextRowId,
+                filters: new Map(filters), hidden: new Set(hidden),
+                colWidths: new Map(colWidths), rowHeights: new Map(rowHeights),
+                frozenRows, frozenCols,
+            }
         }
-    }
-    function restoreAux(aux) {
-        rowIds = aux.rowIds ? aux.rowIds.slice() : null
-        nextRowId = aux.nextRowId
-        filters = new Map(aux.filters)
-        hidden = new Set(aux.hidden)
-        colWidths = new Map(aux.colWidths ?? [])
-        rowHeights = new Map(aux.rowHeights ?? [])
-        _layoutVersion++
-    }
+
+        function restoreAux(aux) {
+            rowIds = aux.rowIds ? aux.rowIds.slice() : null
+            nextRowId = aux.nextRowId
+            filters = new Map(aux.filters)
+            hidden = new Set(aux.hidden)
+            colWidths = new Map(aux.colWidths ?? [])
+            rowHeights = new Map(aux.rowHeights ?? [])
+            frozenRows = aux.frozenRows ?? 0
+            frozenCols = aux.frozenCols ?? 0
+            _layoutVersion++
+        }
 
     function ensureRowIds() {
         if (!rowIds) {
@@ -1018,18 +1040,15 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             if (!block) return { ok: false, code: 'NO_DATA', changed: false }
             if (col < block.c1 || col > block.c2) return { ok: false, code: 'OUT_OF_RANGE', changed: false }
 
-//            const T = [performance.now()]
-//            const mark = () => T.push(performance.now())
 
             const rowsToSort = []
             for (let r = block.r1; r <= block.r2; r++) if (!hidden.has(r)) rowsToSort.push(r)
             const ids = ensureRowIds()
             const moves = planSort(rowsToSort, dir, (r) => classify(resolveCellValue(cellKey(r, col))), (r) => ids[r])
             if (moves.size === 0) return { ok: true, changed: false }
-//            mark() // 1: plan (comparison)
 
             pushToUndoStack({ type: 'sort', snap: takeSnapshot(), oldRows: rows })
-//            mark() // 2: snapshot
+
 
             const inBlockCol = (c) => c >= block.c1 && c <= block.c2
             const mapRow = (row, c) => (inBlockCol(c) ? moves.get(row) : undefined)
@@ -1042,7 +1061,6 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             }
             cells.clear()
             for (const [k, v] of next) cells.set(k, v)
-//            mark() // 3: move cells + remap formulas
 
             const newIds = ids.slice()
             for (const [from, to] of moves) newIds[to] = ids[from]
@@ -1055,11 +1073,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
             for (const [k, v] of cells.entries()) {
                 if (v.raw && v.raw.charCodeAt(0) === 61) updateDependencies(k, v.raw)
             }
-//            mark() // 4: rebuild graph
 
             markAllCellsDirty()
             recalculate()
-//            mark() // 5: recalculate
 
             return { ok: true, changed: true, moved: moves.size }
         }
@@ -1142,11 +1158,13 @@ function executeSetSize(kind, index, value) {
         if (entry.type === 'batch') {
             for (let i = entry.records.length - 1; i >= 0; i--) {
                 const rec = entry.records[i]
-                setCellRaw(rec.row, rec.col, rec.oldRaw)
+                if (rec.oldRaw !== rec.newRaw) setCellRaw(rec.row, rec.col, rec.oldRaw)
                 setStyleRaw(rec.row, rec.col, rec.oldStyle)
             }
+            for (const s of entry.sizeRecs ?? []) applySize('col', s.col, s.oldW)
+            if (entry.freeze && entry.freeze.rows) frozenRows = entry.freeze.rows[0]
+            if (entry.freeze && entry.freeze.cols) frozenCols = entry.freeze.cols[0]
             redoStack.push(entry)
-//            _generation++
             recalculate()
             return true
         }
@@ -1187,11 +1205,13 @@ function executeSetSize(kind, index, value) {
         }
         if (entry.type === 'batch') {
             for (const rec of entry.records) {
-                setCellRaw(rec.row, rec.col, rec.newRaw)
+                if (rec.oldRaw !== rec.newRaw) setCellRaw(rec.row, rec.col, rec.newRaw)
                 setStyleRaw(rec.row, rec.col, rec.newStyle)
             }
+            for (const s of entry.sizeRecs ?? []) applySize('col', s.col, s.newW)
+            if (entry.freeze && entry.freeze.rows) frozenRows = entry.freeze.rows[1]
+            if (entry.freeze && entry.freeze.cols) frozenCols = entry.freeze.cols[1]
             undoStack.push(entry)
-//            _generation++
             recalculate()
             return true
         }
@@ -1200,7 +1220,6 @@ function executeSetSize(kind, index, value) {
             const currentValue = getCellRaw(entry.r, entry.c).raw
             undoStack.push({ ...entry, oldVal: currentValue })
             setCellRaw(entry.r, entry.c, entry.newVal)
-//            _generation++
             recalculate()
         } else {
             undoStack.push({
@@ -1281,6 +1300,8 @@ function executeSetSize(kind, index, value) {
         setColWidth: (c, w) => executeSetSize('col', c, w),
         setRowHeight: (r, h) => executeSetSize('row', r, h),
         layoutVersion: () => _layoutVersion,
+        getFrozenRows: () => frozenRows,
+        getFrozenCols: () => frozenCols,
         // Internal state is not exposed - if you need to serialize/deserialize,
         // you'll need to work with the public API or add new methods
     }

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { requestAction, runQuery, insertResult } from './ai/pipeline.js'
+import { requestAction, runQuery, insertResult, applyFormat } from './ai/pipeline.js'
 import { describePlan } from './ai/describe.js'
+import { measureText } from './measureText.js'
 
 const PREVIEW_ROWS = 100
 
@@ -10,7 +11,7 @@ function QueryCard({ outcome, activeLabel, onRerun, onInserted }) {
   const { result } = outcome
   const insert = () => {
     const r = insertResult(outcome.engine, result, where.trim() || activeLabel)
-    setNote(r.ok ? `Inserted at ${r.at}. One undo step (use the Undo button or click the grid, then Ctrl+Z).` : r.error)
+    setNote(r.ok ? `Inserted at ${r.at}. One undo step (Undo button, or click the grid then Ctrl+Z).` : r.error)
     if (r.ok) onInserted()
   }
   return (
@@ -42,6 +43,35 @@ function QueryCard({ outcome, activeLabel, onRerun, onInserted }) {
   )
 }
 
+function FormatCard({ outcome, engine, onChange }) {
+  const [state, setState] = useState({ status: 'ready', note: '' })
+  const plan = outcome.plan
+  const ok = plan.result === 'OK'
+  const apply = () => {
+    const r = applyFormat(outcome.action, engine, measureText) // re-plans against the CURRENT sheet
+    if (r.result === 'OK') {
+      setState({ status: 'applied', note: `Applied: ${r.info.cellsChanged} cells restyled in ${r.ms.toFixed(1)} ms. One undo step (Undo button, or click the grid then Ctrl+Z).` })
+      onChange()
+    } else {
+      setState({ status: 'ready', note: `${r.result}: ${r.message}` })
+    }
+  }
+  return (
+    <>
+      {ok
+        ? <div className="ai-desc"><strong>Preview:</strong> {outcome.text}.</div>
+        : <div className="ai-err"><strong>{plan.result}</strong>: {plan.message}</div>}
+      {ok && state.status === 'ready' && (
+        <div className="ai-actions">
+          <button className="toolbar-btn" onClick={apply}>Apply</button>
+          <button className="toolbar-btn" onClick={() => setState({ status: 'discarded', note: 'Discarded. Nothing changed.' })}>Discard</button>
+        </div>
+      )}
+      {state.note && <div className="ai-meta">{state.note}</div>}
+    </>
+  )
+}
+
 function Card({ card, engine, activeLabel, showPlan, onRerun, onChange }) {
   const o = card.outcome
   return (
@@ -57,7 +87,7 @@ function Card({ card, engine, activeLabel, showPlan, onRerun, onChange }) {
       )}
       {o?.kind === 'clarify' && <div className="ai-clarify">🤔 {o.question}</div>}
       {o?.kind === 'query' && <QueryCard outcome={{ ...o, engine }} activeLabel={activeLabel} onRerun={onRerun} onInserted={onChange} />}
-      {o?.kind === 'format' && <div className="ai-meta">Format actions are applied in the Format step (next).</div>}
+      {o?.kind === 'format' && <FormatCard outcome={o} engine={engine} onChange={onChange} />}
       {showPlan && o?.action && <pre className="ai-plan">{JSON.stringify(o.action, null, 2)}</pre>}
     </div>
   )
@@ -84,7 +114,7 @@ export default function AiPanel({ engine, provider, activeLabel, selectionLabel,
     setInput('')
     setBusy(true)
     setCards((cs) => [...cs, { id, prompt, pending: true }])
-    const out = await requestAction({ provider, engine, prompt, history, selection: selectionLabel })
+    const out = await requestAction({ provider, engine, prompt, history, selection: selectionLabel, measure: measureText })
     setCards((cs) => cs.map((c) => (c.id === id ? { ...c, pending: false, ...out } : c)))
     setBusy(false)
   }
@@ -102,7 +132,7 @@ export default function AiPanel({ engine, provider, activeLabel, selectionLabel,
         <button className="toolbar-btn" onClick={onClose} title="Close (Ctrl+K)">✕</button>
       </div>
       <div className="ai-body">
-        {cards.length === 0 && <div className="ai-meta">Try: “What is the total sales by region?” (mock mode answers the prompts in fixtures/ai-eval/).</div>}
+        {cards.length === 0 && <div className="ai-meta">Try: “What is the total sales by region?” or “Format this as a clean table” (mock mode answers the prompts in fixtures/ai-eval/).</div>}
         {cards.map((c) => (
           <Card key={c.id} card={c} engine={engine} activeLabel={activeLabel} showPlan={showPlan} onRerun={() => rerun(c.id)} onChange={onChange} />
         ))}
@@ -112,7 +142,7 @@ export default function AiPanel({ engine, provider, activeLabel, selectionLabel,
         <input
           className="fm-input ai-input"
           autoFocus
-          placeholder="Ask about your data…"
+          placeholder="Ask about your data, or say how to format it…"
           value={input}
           disabled={busy}
           onChange={(e) => setInput(e.target.value)}

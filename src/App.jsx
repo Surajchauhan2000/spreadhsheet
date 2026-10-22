@@ -37,7 +37,8 @@ export default function App() {
   const dragRef = useRef(null)
   const skipBlurRef = useRef(false)
   const apiRef = useRef(null)                      // VirtualGrid's scrollToCell / pageRows
-  const [freeze, setFreeze] = useState({ rows: 0, cols: 0 })
+  const freeze = { rows: engine.getFrozenRows(), cols: engine.getFrozenCols() }
+
   const [nameEdit, setNameEdit] = useState(null)   // text typed in the name box (null = show selection label)
   const [aiOpen, setAiOpen] = useState(false)
   const [provider] = useState(() => createProvider())
@@ -494,8 +495,8 @@ const doSort = (col) => {
           </div>
 
           <div className="toolbar-group">
-            <button className={`toolbar-btn ${freeze.rows ? 'active' : ''}`} onClick={() => setFreeze((f) => ({ ...f, rows: f.rows ? 0 : 1 }))} title="Freeze row 1">❄ Row 1</button>
-            <button className={`toolbar-btn ${freeze.cols ? 'active' : ''}`} onClick={() => setFreeze((f) => ({ ...f, cols: f.cols ? 0 : 1 }))} title="Freeze column A">❄ Col A</button>
+                        <button className={`toolbar-btn ${freeze.rows ? 'active' : ''}`} onClick={() => { engine.applyChanges([], { freezeRows: freeze.rows ? 0 : 1 }); rerender() }} title="Freeze row 1">❄ Row 1</button>
+                        <button className={`toolbar-btn ${freeze.cols ? 'active' : ''}`} onClick={() => { engine.applyChanges([], { freezeCols: freeze.cols ? 0 : 1 }); rerender() }} title="Freeze column A">❄ Col A</button>
             <button className={`toolbar-btn ${aiOpen ? 'active' : ''}`} onClick={() => setAiOpen((o) => !o)} title="Ask AI (Ctrl+K)">✨ Ask AI</button>
           </div>
 
