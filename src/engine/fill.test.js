@@ -43,6 +43,10 @@ describe('fillLine: dates', () => {
     it('each filled cell keeps its paired seed format', () => {
         expect(raws(['2024-01-15', '1/16/2024', '2024-01-17'], 3)).toEqual(['2024-01-18', '1/19/2024', '2024-01-20'])
     })
+    it('supports the "15 Jan 2024" format', () => {
+        expect(raws(['15 Jan 2024', '16 Jan 2024'], 2)).toEqual(['17 Jan 2024', '18 Jan 2024'])
+        expect(raws(['30 Jan 2024', '31 Jan 2024'], 1)).toEqual(['1 Feb 2024'])
+    })
 })
 
 describe('fillLine: weekday and month names', () => {

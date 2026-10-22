@@ -7,7 +7,7 @@ const NUM_RE = /^-?\d+(\.\d+)?$/
 const TRAIL_RE = /^(.*?)(\d+)$/ // "ORD-1001" -> prefix "ORD-", digits "1001"
 
 // ── helpers ──
-
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const pad2 = (n) => String(n).padStart(2, '0')
 const fmtNum = (x) => String(Math.round(x * 1e10) / 1e10)
 
@@ -16,7 +16,7 @@ function seriesStep(nums) {
 }
 
 // ── dates ──
-// Each format knows how to parse a seed and print a day back in the seed's style.
+
 // TODO: add the third sample format listed in AI_CONTRACT.md / sales.tsv.
 
 const DATE_FORMATS = [
@@ -36,6 +36,15 @@ const DATE_FORMATS = [
             const f = seed.pad ? pad2 : String
             return `${f(p.mo)}/${f(p.d)}/${p.y}`
         },
+    },
+    {
+        parse(s) {
+            const m = /^(\d{1,2}) ([A-Za-z]{3}) (\d{4})$/.exec(s)
+            if (!m) return null
+            const mo = MONTH_ABBR.findIndex((x) => x.toLowerCase() === m[2].toLowerCase()) + 1
+            return mo ? { y: +m[3], mo, d: +m[1], pad: /^0/.test(m[1]) } : null
+        },
+        format: (p, seed) => `${seed.pad ? pad2(p.d) : p.d} ${MONTH_ABBR[p.mo - 1]} ${p.y}`,
     },
 ]
 
