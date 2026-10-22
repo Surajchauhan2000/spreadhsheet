@@ -571,8 +571,9 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         }
         // Process any remaining affected cells that weren't in the sorted list
         // (e.g., cells with no dependencies or circular dependencies)
+        const sortedSet = new Set(sorted)
         for (const cell of affected) {
-            if (!sorted.includes(cell)) {
+            if (!sortedSet.has(cell)) {
                 computedCache.delete(cell)
                 resolveCellValue(cell)
             }
@@ -587,34 +588,54 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         }
     }
 
-    // ── Core cell operations ──
+        // ── Core cell operations ──
 
-    function setCellRaw(row, col, raw) {
-        const key = cellKey(row, col)
-        graph.removeAllDependencies(key)
-        computedCache.delete(key)
+        function setCellRaw(row, col, raw) {
+            const key = cellKey(row, col)
+            const prev = cells.get(key)
+            const style = prev ? prev.style : undefined
+            graph.removeAllDependencies(key)
+            computedCache.delete(key)
 
-        if (!raw || raw.trim() === '') {
-            cells.delete(key)
-            markCellDirty(key)
-            return
-        }
-
-        if (raw.startsWith('=')) {
-            cells.set(key, { raw, computed: null, error: null })
-            updateDependencies(key, raw)
-            if (graph.hasCycle(key)) {
-                graph.removeAllDependencies(key)
-                cells.set(key, { raw, computed: null, error: '#CYCLE!' })
+            if (!raw || raw.trim() === '') {
+                // A styled blank cell must survive; an unstyled blank cell is just removed
+                if (style) cells.set(key, { raw: '', computed: null, error: null, style })
+                else cells.delete(key)
                 markCellDirty(key)
                 return
             }
-        } else {
-            cells.set(key, { raw, computed: null, error: null })
+
+            if (raw.startsWith('=')) {
+                cells.set(key, { raw, computed: null, error: null, style })
+                updateDependencies(key, raw)
+                if (graph.hasCycle(key)) {
+                    graph.removeAllDependencies(key)
+                    cells.set(key, { raw, computed: null, error: '#CYCLE!', style })
+                    markCellDirty(key)
+                    return
+                }
+            } else {
+                cells.set(key, { raw, computed: null, error: null, style })
+            }
+
+            markCellDirty(key)
         }
 
-        markCellDirty(key)
-    }
+        // Style-only write. Styles are treated as immutable objects (never mutate in place).
+        function setStyleRaw(row, col, style) {
+            const key = cellKey(row, col)
+            const prev = cells.get(key)
+            const empty = !style || Object.keys(style).length === 0
+            if (!prev) {
+                if (!empty) cells.set(key, { raw: '', computed: null, error: null, style })
+                return
+            }
+            if (empty && !prev.raw) {
+                cells.delete(key)
+                return
+            }
+            cells.set(key, { ...prev, style: empty ? undefined : style })
+        }
 
     function getCellRaw(row, col) {
         const key = cellKey(row, col)
@@ -780,6 +801,54 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         recalculate()
     }
 
+        // One undo step for any number of cell/style writes. One recalculation at the end.
+        // changes: [{ row, col, raw?, style? }]  (raw/style undefined = keep, style null = clear)
+        function executeBatch(changes) {
+            const records = []
+            for (const ch of changes) {
+                const prev = getCellRaw(ch.row, ch.col)
+                const newRaw = ch.raw === undefined ? prev.raw : ch.raw
+                const newStyle = ch.style === undefined ? prev.style : (ch.style === null ? undefined : ch.style)
+                const sameStyle = JSON.stringify(newStyle ?? null) === JSON.stringify(prev.style ?? null)
+                if (newRaw === prev.raw && sameStyle) continue
+                records.push({ row: ch.row, col: ch.col, oldRaw: prev.raw, newRaw, oldStyle: prev.style, newStyle })
+                if (newRaw !== prev.raw) setCellRaw(ch.row, ch.col, newRaw)
+                if (!sameStyle) setStyleRaw(ch.row, ch.col, newStyle)
+            }
+            if (records.length === 0) return false // no-op: no undo entry
+            pushToUndoStack({ type: 'batch', records })
+            _generation++
+            recalculate()
+            return true
+        }
+
+        // Clear values (not styles) in a rectangle: one undo step.
+        function executeClear(range) {
+            const changes = []
+            for (const [key, cell] of cells.entries()) {
+                if (!cell.raw) continue
+                const p = cellCoords(key)
+                if (p.row >= range.r1 && p.row <= range.r2 && p.col >= range.c1 && p.col <= range.c2) {
+                    changes.push({ row: p.row, col: p.col, raw: '' })
+                }
+            }
+            return executeBatch(changes)
+        }
+
+        // Bounding box of non-empty cells, or null. Used for Ctrl+A.
+        function getUsedRange() {
+            let r1 = Infinity, c1 = Infinity, r2 = -1, c2 = -1
+            for (const [key, cell] of cells.entries()) {
+                if (!cell.raw) continue
+                const p = cellCoords(key)
+                if (p.row < r1) r1 = p.row
+                if (p.row > r2) r2 = p.row
+                if (p.col < c1) c1 = p.col
+                if (p.col > c2) c2 = p.col
+            }
+            return r2 < 0 ? null : { r1, c1, r2, c2 }
+        }
+
     function executeInsertRow(atIndex) {
         const snapshot = takeSnapshot()
         const previousRows = rows
@@ -815,7 +884,17 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function undo() {
         if (undoStack.length === 0) return false
         const entry = undoStack.pop()
-
+        if (entry.type === 'batch') {
+            for (let i = entry.records.length - 1; i >= 0; i--) {
+                const rec = entry.records[i]
+                setCellRaw(rec.row, rec.col, rec.oldRaw)
+                setStyleRaw(rec.row, rec.col, rec.oldStyle)
+            }
+            redoStack.push(entry)
+            _generation++
+            recalculate()
+            return true
+        }
         if (entry.type === 'set') {
             // For cell edits, swap current value to redo stack and restore old value
             const currentValue = getCellRaw(entry.r, entry.c).raw
@@ -846,6 +925,16 @@ export function createEngine(initialRows = 50, initialCols = 50) {
     function redo() {
         if (redoStack.length === 0) return false
         const entry = redoStack.pop()
+        if (entry.type === 'batch') {
+            for (const rec of entry.records) {
+                setCellRaw(rec.row, rec.col, rec.newRaw)
+                setStyleRaw(rec.row, rec.col, rec.newStyle)
+            }
+            undoStack.push(entry)
+            _generation++
+            recalculate()
+            return true
+        }
 
         if (entry.type === 'set') {
             const currentValue = getCellRaw(entry.r, entry.c).raw
@@ -879,11 +968,11 @@ export function createEngine(initialRows = 50, initialCols = 50) {
 
         // Error values are strings starting with '#' (e.g., '#CYCLE!', '#VALUE!')
         if (typeof value === 'string' && value.startsWith('#')) {
-            return { raw: cell.raw, computed: null, error: value }
+            return { raw: cell.raw, computed: null, error: value, style: cell.style }
         }
         // Return the computed value (which may be a number or string)
         // Note: Empty cells return '' as computed value, not null
-        return { raw: cell.raw, computed: value, error: null }
+        return { raw: cell.raw, computed: value, error: null, style: cell.style }
     }
 
     // ── Public API ──
@@ -906,6 +995,11 @@ export function createEngine(initialRows = 50, initialCols = 50) {
         canRedo: () => redoStack.length > 0,
         // Grow the grid so that at least minRows x minCols exist. The engine is
         // sparse, so this only moves the bounds; nothing is allocated.
+        getRaw: (row, col) => cells.get(cellKey(row, col))?.raw ?? '',
+        getStyle: (row, col) => cells.get(cellKey(row, col))?.style,
+        applyChanges: executeBatch,
+        clearContents: executeClear,
+        getUsedRange,
         ensureCapacity: (minRows, minCols) => {
             if (minRows > rows) rows = minRows
             if (minCols > cols) cols = minCols
